@@ -200,11 +200,27 @@ type BatchJob struct {
 
 // BatchMetadata contains batch job metadata.
 type BatchMetadata struct {
-	Type        string `json:"@type,omitempty"`
-	DisplayName string `json:"displayName,omitempty"`
-	State       string `json:"state"`
-	CreateTime  string `json:"createTime,omitempty"`
-	UpdateTime  string `json:"updateTime,omitempty"`
+	Type        string       `json:"@type,omitempty"`
+	Model       string       `json:"model,omitempty"`
+	DisplayName string       `json:"displayName,omitempty"`
+	State       string       `json:"state"`
+	CreateTime  string       `json:"createTime,omitempty"`
+	EndTime     string       `json:"endTime,omitempty"`
+	UpdateTime  string       `json:"updateTime,omitempty"`
+	Output      *BatchOutput `json:"output,omitempty"`
+	BatchStats  *BatchStats  `json:"batchStats,omitempty"`
+}
+
+// BatchOutput contains batch output in metadata (mirrors response structure).
+type BatchOutput struct {
+	InlinedResponses *InlinedResponsesWrapper `json:"inlinedResponses,omitempty"`
+}
+
+// BatchStats contains batch job statistics.
+type BatchStats struct {
+	RequestCount           string `json:"requestCount,omitempty"`
+	SuccessfulRequestCount string `json:"successfulRequestCount,omitempty"`
+	FailedRequestCount     string `json:"failedRequestCount,omitempty"`
 }
 
 // StatusError is an error status.
@@ -215,16 +231,26 @@ type StatusError struct {
 
 // BatchResponse is the response from a completed batch job.
 type BatchResponse struct {
-	Type             string            `json:"@type,omitempty"`
-	InlinedResponses []InlinedResponse `json:"inlinedResponses,omitempty"`
-	ResponsesFile    string            `json:"responsesFile,omitempty"`
+	Type             string                   `json:"@type,omitempty"`
+	InlinedResponses *InlinedResponsesWrapper `json:"inlinedResponses,omitempty"`
+	ResponsesFile    string                   `json:"responsesFile,omitempty"`
+}
+
+// InlinedResponsesWrapper wraps the array of inlined responses.
+type InlinedResponsesWrapper struct {
+	InlinedResponses []InlinedResponse `json:"inlinedResponses"`
 }
 
 // InlinedResponse is an inline response from a batch job.
 type InlinedResponse struct {
-	Key      string                   `json:"key,omitempty"`
 	Response *GenerateContentResponse `json:"response,omitempty"`
+	Metadata *ResponseMetadata        `json:"metadata,omitempty"`
 	Error    *StatusError             `json:"error,omitempty"`
+}
+
+// ResponseMetadata contains metadata for a batch response item.
+type ResponseMetadata struct {
+	Key string `json:"key,omitempty"`
 }
 
 // BatchListResponse is the response from listing batches.

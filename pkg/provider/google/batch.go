@@ -158,8 +158,8 @@ func (c *Client) GetBatchResults(ctx context.Context, batchID string) ([]provide
 	}
 
 	// Check for inline responses
-	if batchJob.Response != nil && len(batchJob.Response.InlinedResponses) > 0 {
-		return c.convertInlinedResponses(batchJob.Response.InlinedResponses), nil
+	if batchJob.Response != nil && batchJob.Response.InlinedResponses != nil && len(batchJob.Response.InlinedResponses.InlinedResponses) > 0 {
+		return c.convertInlinedResponses(batchJob.Response.InlinedResponses.InlinedResponses), nil
 	}
 
 	// Check for file-based responses
@@ -204,8 +204,9 @@ func (c *Client) downloadBatchResults(ctx context.Context, fileName string) ([]p
 			continue
 		}
 
-		result := provider.BatchResult{
-			CustomID: line.Key,
+		result := provider.BatchResult{}
+		if line.Metadata != nil {
+			result.CustomID = line.Metadata.Key
 		}
 
 		if line.Error != nil {
@@ -224,8 +225,9 @@ func (c *Client) downloadBatchResults(ctx context.Context, fileName string) ([]p
 func (c *Client) convertInlinedResponses(responses []InlinedResponse) []provider.BatchResult {
 	results := make([]provider.BatchResult, len(responses))
 	for i, resp := range responses {
-		results[i] = provider.BatchResult{
-			CustomID: resp.Key,
+		results[i] = provider.BatchResult{}
+		if resp.Metadata != nil {
+			results[i].CustomID = resp.Metadata.Key
 		}
 
 		if resp.Error != nil {
@@ -336,9 +338,9 @@ func (c *Client) convertBatchJob(batch *BatchJob, model string) *provider.BatchJ
 		if batch.Response.ResponsesFile != "" {
 			job.Metadata["responses_file"] = batch.Response.ResponsesFile
 		}
-		if len(batch.Response.InlinedResponses) > 0 {
-			job.RequestCounts.Total = len(batch.Response.InlinedResponses)
-			job.RequestCounts.Completed = len(batch.Response.InlinedResponses)
+		if batch.Response.InlinedResponses != nil && len(batch.Response.InlinedResponses.InlinedResponses) > 0 {
+			job.RequestCounts.Total = len(batch.Response.InlinedResponses.InlinedResponses)
+			job.RequestCounts.Completed = len(batch.Response.InlinedResponses.InlinedResponses)
 		}
 	}
 
@@ -355,20 +357,20 @@ func (c *Client) convertBatchStatus(batch *BatchJob) provider.BatchStatus {
 		return provider.BatchStatusCompleted
 	}
 
-	// Check metadata state
+	// Check metadata state - handle both JOB_STATE_* and BATCH_STATE_* prefixes
 	if batch.Metadata != nil {
 		switch batch.Metadata.State {
-		case "JOB_STATE_PENDING":
+		case "JOB_STATE_PENDING", "BATCH_STATE_PENDING":
 			return provider.BatchStatusPending
-		case "JOB_STATE_RUNNING":
+		case "JOB_STATE_RUNNING", "BATCH_STATE_RUNNING":
 			return provider.BatchStatusInProgress
-		case "JOB_STATE_SUCCEEDED":
+		case "JOB_STATE_SUCCEEDED", "BATCH_STATE_SUCCEEDED":
 			return provider.BatchStatusCompleted
-		case "JOB_STATE_FAILED":
+		case "JOB_STATE_FAILED", "BATCH_STATE_FAILED":
 			return provider.BatchStatusFailed
-		case "JOB_STATE_CANCELLED":
+		case "JOB_STATE_CANCELLED", "BATCH_STATE_CANCELLED":
 			return provider.BatchStatusCancelled
-		case "JOB_STATE_EXPIRED":
+		case "JOB_STATE_EXPIRED", "BATCH_STATE_EXPIRED":
 			return provider.BatchStatusExpired
 		}
 	}
