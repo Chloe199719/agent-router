@@ -944,21 +944,17 @@ func TestCreateBatch_SubmitsCorrectRequest(t *testing.T) {
 	}
 }
 
-func TestCreateBatch_UploadsCustomIDs(t *testing.T) {
-	var gcsUploads []string
-	var customIDsContent []byte
+func TestCreateBatch_EmbedsCustomIDInLabels(t *testing.T) {
+	var inputJSONL []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Handle GCS upload
 		if strings.Contains(r.URL.Path, "/upload/storage/") {
 			uploadName := r.URL.Query().Get("name")
-			gcsUploads = append(gcsUploads, uploadName)
-
-			if strings.HasSuffix(uploadName, "/custom_ids.json") {
+			if strings.HasSuffix(uploadName, "/input.jsonl") {
 				body, _ := io.ReadAll(r.Body)
-				customIDsContent = body
+				inputJSONL = body
 			}
-
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"name": uploadName})
 			return
@@ -986,7 +982,7 @@ func TestCreateBatch_UploadsCustomIDs(t *testing.T) {
 	)
 	client.httpClient = server.Client()
 
-	job, err := client.CreateBatch(context.Background(), []provider.BatchRequest{
+	_, err := client.CreateBatch(context.Background(), []provider.BatchRequest{
 		{
 			CustomID: "request-alpha",
 			Request: &types.CompletionRequest{
@@ -1004,82 +1000,136 @@ func TestCreateBatch_UploadsCustomIDs(t *testing.T) {
 	})
 
 	// GCS uploads will fail since test server URL doesn't match storage.googleapis.com.
-	// If they succeed (e.g., httpClient is overridden), verify the full flow.
-	if err == nil {
-		// Should have uploaded both input.jsonl and custom_ids.json
-		hasInput := false
-		hasCustomIDs := false
-		for _, name := range gcsUploads {
-			if strings.HasSuffix(name, "/input.jsonl") {
-				hasInput = true
-			}
-			if strings.HasSuffix(name, "/custom_ids.json") {
-				hasCustomIDs = true
-			}
-		}
-		if !hasInput {
-			t.Error("expected input.jsonl to be uploaded")
-		}
-		if !hasCustomIDs {
-			t.Error("expected custom_ids.json to be uploaded")
+	// If they succeed (httpClient overridden to test server), verify input JSONL content.
+	if err == nil && inputJSONL != nil {
+		// Parse each line and verify custom_id is in labels
+		lines := strings.Split(strings.TrimSpace(string(inputJSONL)), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 lines in JSONL, got %d", len(lines))
 		}
 
-		// Verify custom_ids.json content
-		if customIDsContent != nil {
-			var ids []string
-			if err := json.Unmarshal(customIDsContent, &ids); err != nil {
-				t.Fatalf("failed to parse custom_ids.json: %v", err)
-			}
-			if len(ids) != 2 {
-				t.Fatalf("expected 2 custom IDs, got %d", len(ids))
-			}
-			if ids[0] != "request-alpha" {
-				t.Errorf("expected first custom ID 'request-alpha', got %q", ids[0])
-			}
-			if ids[1] != "request-beta" {
-				t.Errorf("expected second custom ID 'request-beta', got %q", ids[1])
-			}
+		type inputLine struct {
+			Request struct {
+				Labels map[string]string `json:"labels"`
+			} `json:"request"`
 		}
 
-		// Verify custom_ids_uri is in job metadata
-		customIDsURI, ok := job.Metadata["custom_ids_uri"].(string)
-		if !ok || customIDsURI == "" {
-			t.Error("expected custom_ids_uri in job metadata")
+		var line0, line1 inputLine
+		if err := json.Unmarshal([]byte(lines[0]), &line0); err != nil {
+			t.Fatalf("failed to parse line 0: %v", err)
 		}
-		if !strings.Contains(customIDsURI, "custom_ids.json") {
-			t.Errorf("expected custom_ids_uri to reference custom_ids.json, got %q", customIDsURI)
+		if err := json.Unmarshal([]byte(lines[1]), &line1); err != nil {
+			t.Fatalf("failed to parse line 1: %v", err)
+		}
+
+		if line0.Request.Labels["custom_id"] != "request-alpha" {
+			t.Errorf("expected custom_id 'request-alpha' in line 0 labels, got %q", line0.Request.Labels["custom_id"])
+		}
+		if line1.Request.Labels["custom_id"] != "request-beta" {
+			t.Errorf("expected custom_id 'request-beta' in line 1 labels, got %q", line1.Request.Labels["custom_id"])
 		}
 	}
 }
 
-func TestLoadCustomIDs(t *testing.T) {
-	// Set up a server that serves custom_ids.json
+// rewriteTransport rewrites all requests to point to a test server URL.
+type rewriteTransport struct {
+	targetURL string
+	transport http.RoundTripper
+}
+
+func (t *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Rewrite the URL to point to the test server, preserving path and query
+	req.URL.Scheme = "http"
+	req.URL.Host = strings.TrimPrefix(t.targetURL, "http://")
+	return t.transport.RoundTrip(req)
+}
+
+func TestDownloadBatchResults_ExtractsCustomID(t *testing.T) {
+	// Simulate Vertex AI batch output JSONL where request is echoed back
+	// with labels containing custom_id, and results are OUT OF ORDER.
+	outputJSONL := strings.Join([]string{
+		`{"status":"","processed_time":"2024-11-01T18:13:16.826+00:00","request":{"contents":[{"parts":[{"text":"World"}],"role":"user"}],"labels":{"custom_id":"request-beta"}},"response":{"candidates":[{"content":{"parts":[{"text":"Response to World"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":5,"totalTokenCount":8}}}`,
+		`{"status":"","processed_time":"2024-11-01T18:13:17.000+00:00","request":{"contents":[{"parts":[{"text":"Hello"}],"role":"user"}],"labels":{"custom_id":"request-alpha"}},"response":{"candidates":[{"content":{"parts":[{"text":"Response to Hello"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":4,"totalTokenCount":6}}}`,
+	}, "\n")
+
+	// Set up server that serves the batch job status and GCS output
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o/") && r.URL.Query().Get("alt") == "media" {
-			ids := []string{"req-1", "req-2", "req-3"}
-			json.NewEncoder(w).Encode(ids)
+		// Handle GetBatch
+		if strings.Contains(r.URL.Path, "/batchPredictionJobs/") && !strings.HasSuffix(r.URL.Path, "/batchPredictionJobs") {
+			resp := VertexBatchPredictionJob{
+				Name:        "projects/proj/locations/loc/batchPredictionJobs/123",
+				DisplayName: "batch-test",
+				State:       "JOB_STATE_SUCCEEDED",
+				OutputInfo: &VertexBatchOutputInfo{
+					GcsOutputDirectory: "gs://my-bucket/staging/batch-test/output/",
+				},
+			}
+			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
+		// Handle GCS list objects
+		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o") && r.URL.Query().Get("alt") != "media" {
+			listResp := map[string]any{
+				"items": []map[string]string{
+					{"name": "staging/batch-test/output/prediction-model-001"},
+				},
+			}
+			json.NewEncoder(w).Encode(listResp)
+			return
+		}
+
+		// Handle GCS download
+		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o/") && r.URL.Query().Get("alt") == "media" {
+			w.Write([]byte(outputJSONL))
+			return
+		}
+
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
+	// Use a transport that rewrites all URLs (including storage.googleapis.com)
+	// to the test server, so GCS calls are intercepted.
 	client := New("proj", "loc",
 		provider.WithAccessToken("tok"),
-		provider.WithBatchBucket("my-bucket"),
+		provider.WithBaseURL(server.URL),
+		provider.WithBatchBucket("my-bucket/staging"),
 	)
-	client.httpClient = server.Client()
-
-	// Test with empty display name
-	ids := client.loadCustomIDs(context.Background(), "")
-	if ids != nil {
-		t.Error("expected nil for empty display name")
+	client.httpClient = &http.Client{
+		Transport: &rewriteTransport{
+			targetURL: server.URL[len("http://"):],
+			transport: http.DefaultTransport,
+		},
 	}
 
-	// Test with no batch bucket
-	client2 := New("proj", "loc", provider.WithAccessToken("tok"))
-	ids = client2.loadCustomIDs(context.Background(), "batch-123")
-	if ids != nil {
-		t.Error("expected nil when no batch bucket configured")
+	results, err := client.GetBatchResults(context.Background(), "projects/proj/locations/loc/batchPredictionJobs/123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	// Results are out of order -- verify custom_id lets us identify them
+	resultMap := make(map[string]*types.CompletionResponse)
+	for _, r := range results {
+		if r.CustomID == "" {
+			t.Error("expected non-empty custom_id on result")
+		}
+		resultMap[r.CustomID] = r.Response
+	}
+
+	if resp, ok := resultMap["request-alpha"]; !ok {
+		t.Error("missing result for 'request-alpha'")
+	} else if resp.Text() != "Response to Hello" {
+		t.Errorf("expected 'Response to Hello', got %q", resp.Text())
+	}
+
+	if resp, ok := resultMap["request-beta"]; !ok {
+		t.Error("missing result for 'request-beta'")
+	} else if resp.Text() != "Response to World" {
+		t.Errorf("expected 'Response to World', got %q", resp.Text())
 	}
 }

@@ -1,5 +1,9 @@
 package vertex
 
+import (
+	googleProvider "github.com/Chloe199719/agent-router/pkg/provider/google"
+)
+
 // Vertex AI Batch Prediction Jobs API types.
 // See: https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/batch-prediction-from-cloud-storage
 
@@ -71,4 +75,20 @@ type VertexBatchPredictionJobList struct {
 // matching the Gemini API generateContent request format.
 type VertexBatchInputLine struct {
 	Request any `json:"request"`
+}
+
+// VertexBatchOutputLine is a single line in the JSONL output file.
+// Vertex AI echoes the original request back alongside the response,
+// allowing us to extract custom_id from the request's labels.
+type VertexBatchOutputLine struct {
+	Request       *VertexBatchOutputRequest               `json:"request,omitempty"`
+	Response      *googleProvider.GenerateContentResponse `json:"response,omitempty"`
+	Status        string                                  `json:"status,omitempty"`
+	ProcessedTime string                                  `json:"processed_time,omitempty"`
+}
+
+// VertexBatchOutputRequest is the echoed request in the batch output.
+// We only need to parse the labels field to extract custom_id.
+type VertexBatchOutputRequest struct {
+	Labels map[string]string `json:"labels,omitempty"`
 }

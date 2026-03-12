@@ -8,6 +8,7 @@ type GenerateContentRequest struct {
 	SafetySettings    []SafetySetting   `json:"safetySettings,omitempty"`
 	Tools             []Tool            `json:"tools,omitempty"`
 	ToolConfig        *ToolConfig       `json:"toolConfig,omitempty"`
+	Labels            map[string]string `json:"labels,omitempty"`
 }
 
 // Content is a content message.

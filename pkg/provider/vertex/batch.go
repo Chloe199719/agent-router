@@ -13,7 +13,6 @@ import (
 
 	"github.com/Chloe199719/agent-router/pkg/errors"
 	"github.com/Chloe199719/agent-router/pkg/provider"
-	googleProvider "github.com/Chloe199719/agent-router/pkg/provider/google"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
@@ -41,19 +40,24 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		model = "gemini-2.0-flash" // Default model
 	}
 
-	// Build JSONL content from requests and collect custom IDs
+	// Build JSONL content from requests, embedding custom_id in each request's
+	// labels so it gets echoed back in the output for result correlation.
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
-	customIDs := make([]string, 0, len(requests))
 	for _, req := range requests {
 		gReq := c.transformer.TransformRequest(req.Request)
+		if req.CustomID != "" {
+			if gReq.Labels == nil {
+				gReq.Labels = make(map[string]string)
+			}
+			gReq.Labels["custom_id"] = req.CustomID
+		}
 		line := VertexBatchInputLine{
 			Request: gReq,
 		}
 		if err := encoder.Encode(line); err != nil {
 			return nil, errors.ErrInvalidRequest("failed to marshal batch request line").WithCause(err)
 		}
-		customIDs = append(customIDs, req.CustomID)
 	}
 
 	// Upload JSONL to GCS
@@ -65,17 +69,6 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 
 	if err := c.uploadToGCS(ctx, bucket, inputPath, buf.Bytes()); err != nil {
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to upload batch input to GCS").WithCause(err)
-	}
-
-	// Upload custom_ids mapping file so we can correlate results back to requests.
-	// Vertex AI preserves input line order in output, so index-based mapping works.
-	customIDsPath := fmt.Sprintf("%s%s/custom_ids.json", prefix, batchID)
-	customIDsData, err := json.Marshal(customIDs)
-	if err != nil {
-		return nil, errors.ErrInvalidRequest("failed to marshal custom IDs").WithCause(err)
-	}
-	if err := c.uploadToGCS(ctx, bucket, customIDsPath, customIDsData); err != nil {
-		return nil, errors.ErrServerError(types.ProviderVertex, "failed to upload custom IDs mapping to GCS").WithCause(err)
 	}
 
 	// Create batch prediction job
@@ -126,10 +119,7 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
-	result := c.convertVertexBatchJob(&job, model)
-	result.Metadata["custom_ids_uri"] = fmt.Sprintf("gs://%s/%s", bucket, customIDsPath)
-
-	return result, nil
+	return c.convertVertexBatchJob(&job, model), nil
 }
 
 // GetBatch retrieves the status of a batch prediction job.
@@ -187,25 +177,9 @@ func (c *Client) GetBatchResults(ctx context.Context, batchID string) ([]provide
 		return nil, errors.ErrServerError(types.ProviderVertex, "no output directory found in batch job")
 	}
 
-	// Download and parse results from GCS
-	results, err := c.downloadBatchResults(ctx, outputDir)
-	if err != nil {
-		return nil, err
-	}
-
-	// Try to load custom_ids mapping to correlate results back to requests.
-	// The mapping is stored alongside the input when the batch was created.
-	displayName, _ := job.Metadata["display_name"].(string)
-	customIDs := c.loadCustomIDs(ctx, displayName)
-	if len(customIDs) > 0 {
-		for i := range results {
-			if i < len(customIDs) {
-				results[i].CustomID = customIDs[i]
-			}
-		}
-	}
-
-	return results, nil
+	// Download and parse results from GCS.
+	// custom_id is extracted from the echoed request labels in each output line.
+	return c.downloadBatchResults(ctx, outputDir)
 }
 
 // downloadBatchResults downloads and parses JSONL results from a GCS output directory.
@@ -228,20 +202,27 @@ func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) 
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to download batch results from GCS").WithCause(err)
 	}
 
-	// Parse JSONL output - each line contains a prediction result
+	// Parse JSONL output - each line contains a prediction result with the
+	// original request echoed back. We extract custom_id from the request's
+	// labels field where we embedded it during CreateBatch.
 	var results []provider.BatchResult
 	decoder := json.NewDecoder(bytes.NewReader(content))
 
 	for decoder.More() {
-		var line struct {
-			Response *googleProvider.GenerateContentResponse `json:"response,omitempty"`
-			Status   string                                  `json:"status,omitempty"`
-		}
+		var line VertexBatchOutputLine
 		if err := decoder.Decode(&line); err != nil {
 			continue
 		}
 
 		result := provider.BatchResult{}
+
+		// Extract custom_id from the echoed request's labels
+		if line.Request != nil {
+			if customID, ok := line.Request.Labels["custom_id"]; ok {
+				result.CustomID = customID
+			}
+		}
+
 		if line.Response != nil {
 			result.Response = c.transformer.TransformResponse(line.Response)
 			if result.Response != nil {
@@ -249,35 +230,14 @@ func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) 
 			}
 		}
 
+		if line.Status != "" {
+			result.Error = errors.ErrServerError(types.ProviderVertex, line.Status)
+		}
+
 		results = append(results, result)
 	}
 
 	return results, nil
-}
-
-// loadCustomIDs attempts to load the custom_ids.json mapping file from GCS.
-// The mapping file is stored at gs://{bucket}/{prefix}{displayName}/custom_ids.json
-// when CreateBatch is called. It returns nil if the mapping cannot be loaded
-// (e.g., batch was created externally or the bucket is not configured).
-func (c *Client) loadCustomIDs(ctx context.Context, displayName string) []string {
-	if c.config.BatchBucket == "" || displayName == "" {
-		return nil
-	}
-
-	bucket, prefix := parseBucketPath(c.config.BatchBucket)
-	mappingPath := fmt.Sprintf("%s%s/custom_ids.json", prefix, displayName)
-
-	data, err := c.downloadFromGCS(ctx, bucket, mappingPath)
-	if err != nil {
-		return nil
-	}
-
-	var ids []string
-	if json.Unmarshal(data, &ids) != nil {
-		return nil
-	}
-
-	return ids
 }
 
 // findBatchOutputFile lists objects in a GCS directory and returns the path of the prediction output file.
