@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -175,14 +176,17 @@ func (c *Client) GetBatchResults(ctx context.Context, batchID string) ([]provide
 
 // downloadBatchResults downloads and parses JSONL results from a GCS output directory.
 func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) ([]provider.BatchResult, error) {
-	// The output directory contains prediction results in JSONL format.
-	// Typically the file is at: {outputDir}/predictions.jsonl or similar.
-	// We try the common pattern first.
-	outputURI := strings.TrimSuffix(gcsOutputDir, "/") + "/predictions.jsonl"
-
-	bucket, objectPath := parseGCSURI(outputURI)
+	// Vertex AI writes output files with dynamic names like "prediction-model-<timestamp>"
+	// so we need to list the output directory to find the actual result file.
+	bucket, prefix := parseGCSURI(strings.TrimSuffix(gcsOutputDir, "/") + "/")
 	if bucket == "" {
-		return nil, errors.ErrServerError(types.ProviderVertex, "invalid GCS output URI: "+outputURI)
+		return nil, errors.ErrServerError(types.ProviderVertex, "invalid GCS output URI: "+gcsOutputDir)
+	}
+
+	// List objects in the output directory to find the result file
+	objectPath, err := c.findBatchOutputFile(ctx, bucket, prefix)
+	if err != nil {
+		return nil, errors.ErrServerError(types.ProviderVertex, "failed to find batch output file in GCS").WithCause(err)
 	}
 
 	content, err := c.downloadFromGCS(ctx, bucket, objectPath)
@@ -215,6 +219,59 @@ func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) 
 	}
 
 	return results, nil
+}
+
+// findBatchOutputFile lists objects in a GCS directory and returns the path of the prediction output file.
+func (c *Client) findBatchOutputFile(ctx context.Context, bucket, prefix string) (string, error) {
+	listURL := fmt.Sprintf("https://storage.googleapis.com/storage/v1/b/%s/o?prefix=%s",
+		bucket, url.QueryEscape(prefix))
+
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", listURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create list request: %w", err)
+	}
+
+	if c.config.AccessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.config.AccessToken)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("list request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("GCS list failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var listResp struct {
+		Items []struct {
+			Name string `json:"name"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return "", fmt.Errorf("decode list response: %w", err)
+	}
+
+	// Look for a prediction output file (Vertex AI names them "prediction-model-<timestamp>")
+	for _, item := range listResp.Items {
+		baseName := item.Name
+		if idx := strings.LastIndex(baseName, "/"); idx >= 0 {
+			baseName = baseName[idx+1:]
+		}
+		if strings.HasPrefix(baseName, "prediction") {
+			return item.Name, nil
+		}
+	}
+
+	if len(listResp.Items) > 0 {
+		// Fall back to the first file found in the directory
+		return listResp.Items[0].Name, nil
+	}
+
+	return "", fmt.Errorf("no output files found in GCS directory: gs://%s/%s", bucket, prefix)
 }
 
 // CancelBatch cancels a batch prediction job.
@@ -344,10 +401,12 @@ func (c *Client) uploadToGCS(ctx context.Context, bucket, objectPath string, dat
 
 // downloadFromGCS downloads an object from GCS using the JSON API.
 func (c *Client) downloadFromGCS(ctx context.Context, bucket, objectPath string) ([]byte, error) {
-	url := fmt.Sprintf("https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media",
-		bucket, objectPath)
+	// The GCS JSON API requires the object path to be URL-encoded
+	encodedPath := url.PathEscape(objectPath)
+	downloadURL := fmt.Sprintf("https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media",
+		bucket, encodedPath)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
