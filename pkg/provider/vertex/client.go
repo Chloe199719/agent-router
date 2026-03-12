@@ -1,40 +1,58 @@
-// Package google provides a Google Gemini API client implementation.
-package google
+// Package vertex provides a Google Vertex AI client implementation.
+//
+// Vertex AI uses the same Gemini API request/response format as the standard
+// Google Gemini API, but with a different base URL pattern and authentication
+// mechanism (OAuth2 Bearer token or API key).
+//
+// URL pattern:
+//
+//	https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL}:{ACTION}
+package vertex
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/Chloe199719/agent-router/pkg/errors"
 	"github.com/Chloe199719/agent-router/pkg/provider"
+	googleProvider "github.com/Chloe199719/agent-router/pkg/provider/google"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
-const (
-	defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
-)
-
-// Client is a Google Gemini API client.
+// Client is a Google Vertex AI client.
 type Client struct {
 	config      *provider.Config
 	httpClient  *http.Client
+	projectID   string
+	location    string
 	baseURL     string
-	transformer *Transformer
+	transformer *googleProvider.Transformer
 }
 
-// New creates a new Google client.
-func New(opts ...provider.Option) *Client {
+// New creates a new Vertex AI client.
+//
+// The projectID and location are required. Authentication is provided via
+// provider.WithAccessToken() (OAuth2 Bearer token) or provider.WithAPIKey()
+// (API key). At least one authentication method must be provided.
+func New(projectID, location string, opts ...provider.Option) *Client {
 	cfg := provider.DefaultConfig()
 	provider.ApplyOptions(cfg, opts...)
 
-	baseURL := defaultBaseURL
-	if cfg.BaseURL != "" {
-		baseURL = cfg.BaseURL
+	if projectID == "" && cfg.ProjectID != "" {
+		projectID = cfg.ProjectID
+	}
+	if location == "" && cfg.Location != "" {
+		location = cfg.Location
+	}
+
+	baseURL := cfg.BaseURL
+	if baseURL == "" {
+		baseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1", location)
 	}
 
 	httpClient := cfg.HTTPClient
@@ -47,33 +65,34 @@ func New(opts ...provider.Option) *Client {
 	return &Client{
 		config:      cfg,
 		httpClient:  httpClient,
+		projectID:   projectID,
+		location:    location,
 		baseURL:     baseURL,
-		transformer: NewTransformer(),
+		transformer: googleProvider.NewTransformer(),
 	}
 }
 
 // Name returns the provider name.
 func (c *Client) Name() types.Provider {
-	return types.ProviderGoogle
+	return types.ProviderVertex
 }
 
-// SupportsFeature checks if Google supports a feature.
+// SupportsFeature checks if Vertex AI supports a feature.
 func (c *Client) SupportsFeature(feature types.Feature) bool {
 	switch feature {
 	case types.FeatureStreaming,
 		types.FeatureStructuredOutput,
 		types.FeatureTools,
 		types.FeatureVision,
-		types.FeatureJSON:
+		types.FeatureJSON,
+		types.FeatureBatch:
 		return true
-	case types.FeatureBatch:
-		return true // Via Vertex AI
 	default:
 		return false
 	}
 }
 
-// Models returns available Google models.
+// Models returns available Vertex AI Gemini models.
 func (c *Client) Models() []string {
 	return []string{
 		"gemini-2.0-flash",
@@ -94,7 +113,7 @@ func (c *Client) Complete(ctx context.Context, req *types.CompletionRequest) (*t
 		return nil, errors.ErrInvalidRequest("failed to marshal request").WithCause(err)
 	}
 
-	url := c.buildURL(req.Model, false)
+	url := c.buildURL(req.Model, "generateContent")
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.ErrInvalidRequest("failed to create request").WithCause(err)
@@ -104,7 +123,7 @@ func (c *Client) Complete(ctx context.Context, req *types.CompletionRequest) (*t
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, errors.ErrProviderUnavailable(types.ProviderGoogle, "request failed").WithCause(err)
+		return nil, errors.ErrProviderUnavailable(types.ProviderVertex, "request failed").WithCause(err)
 	}
 	defer resp.Body.Close()
 
@@ -112,13 +131,14 @@ func (c *Client) Complete(ctx context.Context, req *types.CompletionRequest) (*t
 		return nil, c.handleErrorResponse(resp)
 	}
 
-	var gResp GenerateContentResponse
+	var gResp googleProvider.GenerateContentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gResp); err != nil {
-		return nil, errors.ErrServerError(types.ProviderGoogle, "failed to decode response").WithCause(err)
+		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
 	result := c.transformer.TransformResponse(&gResp)
 	if result != nil {
+		result.Provider = types.ProviderVertex
 		result.Model = req.Model
 	}
 	return result, nil
@@ -133,7 +153,7 @@ func (c *Client) Stream(ctx context.Context, req *types.CompletionRequest) (type
 		return nil, errors.ErrInvalidRequest("failed to marshal request").WithCause(err)
 	}
 
-	url := c.buildURL(req.Model, true)
+	url := c.buildURL(req.Model, "streamGenerateContent")
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.ErrInvalidRequest("failed to create request").WithCause(err)
@@ -143,7 +163,7 @@ func (c *Client) Stream(ctx context.Context, req *types.CompletionRequest) (type
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, errors.ErrProviderUnavailable(types.ProviderGoogle, "request failed").WithCause(err)
+		return nil, errors.ErrProviderUnavailable(types.ProviderVertex, "request failed").WithCause(err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -154,56 +174,82 @@ func (c *Client) Stream(ctx context.Context, req *types.CompletionRequest) (type
 	return newStreamReader(resp.Body, c.transformer, req.Model), nil
 }
 
-// buildURL builds the API URL for a given model and streaming flag.
-func (c *Client) buildURL(model string, stream bool) string {
-	action := "generateContent"
-	if stream {
-		action = "streamGenerateContent"
+// buildURL builds the Vertex AI API URL for a given model and action.
+func (c *Client) buildURL(model, action string) string {
+	url := fmt.Sprintf("%s/projects/%s/locations/%s/publishers/google/models/%s:%s",
+		c.baseURL, c.projectID, c.location, model, action)
+
+	// If using API key auth (no access token), append key as query parameter
+	if c.config.AccessToken == "" && c.config.APIKey != "" {
+		url += "?key=" + c.config.APIKey
 	}
-	return c.baseURL + "/models/" + model + ":" + action + "?key=" + c.config.APIKey
+
+	return url
 }
 
-// setHeaders sets the required headers for Google API requests.
+// setHeaders sets the required headers for Vertex AI API requests.
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
+
+	// Prefer access token (OAuth2 Bearer), fall back to API key (handled in URL)
+	if c.config.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.config.AccessToken)
+	}
 }
 
 // handleErrorResponse converts an error response to a RouterError.
 func (c *Client) handleErrorResponse(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
 
-	var errResp ErrorResponse
+	var errResp googleProvider.ErrorResponse
 	if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != nil {
 		return c.mapAPIError(errResp.Error, resp.StatusCode)
 	}
 
-	return errors.ErrServerError(types.ProviderGoogle, string(body)).WithStatusCode(resp.StatusCode)
+	return errors.ErrServerError(types.ProviderVertex, string(body)).WithStatusCode(resp.StatusCode)
 }
 
-// mapAPIError maps Google API error to RouterError.
-func (c *Client) mapAPIError(apiErr *APIError, statusCode int) error {
+// mapAPIError maps Vertex AI API error to RouterError.
+func (c *Client) mapAPIError(apiErr *googleProvider.APIError, statusCode int) error {
 	switch statusCode {
 	case http.StatusUnauthorized:
-		return errors.ErrInvalidAPIKey(types.ProviderGoogle).WithStatusCode(statusCode)
+		return errors.ErrInvalidAPIKey(types.ProviderVertex).WithStatusCode(statusCode)
+	case http.StatusForbidden:
+		return errors.ErrAuthentication(types.ProviderVertex, apiErr.Message).WithStatusCode(statusCode)
 	case http.StatusTooManyRequests:
-		return errors.ErrRateLimit(types.ProviderGoogle, apiErr.Message).WithStatusCode(statusCode)
+		return errors.ErrRateLimit(types.ProviderVertex, apiErr.Message).WithStatusCode(statusCode)
 	case http.StatusNotFound:
-		return errors.ErrModelNotFound(types.ProviderGoogle, apiErr.Message).WithStatusCode(statusCode)
+		return errors.ErrModelNotFound(types.ProviderVertex, apiErr.Message).WithStatusCode(statusCode)
 	case http.StatusBadRequest:
-		if strings.Contains(apiErr.Message, "context") || strings.Contains(apiErr.Message, "token") {
-			return errors.ErrContextLength(types.ProviderGoogle, apiErr.Message).WithStatusCode(statusCode)
+		if contains(apiErr.Message, "context", "token") {
+			return errors.ErrContextLength(types.ProviderVertex, apiErr.Message).WithStatusCode(statusCode)
 		}
-		return errors.ErrInvalidRequest(apiErr.Message).WithProvider(types.ProviderGoogle).WithStatusCode(statusCode)
+		return errors.ErrInvalidRequest(apiErr.Message).WithProvider(types.ProviderVertex).WithStatusCode(statusCode)
 	default:
-		return errors.ErrServerError(types.ProviderGoogle, apiErr.Message).WithStatusCode(statusCode)
+		return errors.ErrServerError(types.ProviderVertex, apiErr.Message).WithStatusCode(statusCode)
 	}
 }
 
-// streamReader implements types.StreamReader for Google.
+// contains checks if s contains any of the substrings.
+func contains(s string, substrs ...string) bool {
+	for _, sub := range substrs {
+		if len(s) >= len(sub) {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// streamReader implements types.StreamReader for Vertex AI.
+// Vertex AI uses the same JSON array streaming format as the Google Gemini API.
 type streamReader struct {
 	decoder      *json.Decoder
 	body         io.ReadCloser
-	transformer  *Transformer
+	transformer  *googleProvider.Transformer
 	model        string
 	response     *types.CompletionResponse
 	done         bool
@@ -217,7 +263,7 @@ type streamReader struct {
 	started    bool
 }
 
-func newStreamReader(body io.ReadCloser, transformer *Transformer, model string) *streamReader {
+func newStreamReader(body io.ReadCloser, transformer *googleProvider.Transformer, model string) *streamReader {
 	return &streamReader{
 		decoder:     json.NewDecoder(body),
 		body:        body,
@@ -263,7 +309,7 @@ func (s *streamReader) Next() (*types.StreamEvent, error) {
 
 	// Read next element from JSON array
 	for s.decoder.More() {
-		var chunk StreamChunk
+		var chunk googleProvider.StreamChunk
 		if err := s.decoder.Decode(&chunk); err != nil {
 			if err == io.EOF {
 				break
@@ -288,7 +334,7 @@ func (s *streamReader) Next() (*types.StreamEvent, error) {
 }
 
 // processChunk processes a stream chunk and returns an event if applicable.
-func (s *streamReader) processChunk(chunk *StreamChunk) *types.StreamEvent {
+func (s *streamReader) processChunk(chunk *googleProvider.StreamChunk) *types.StreamEvent {
 	if len(chunk.Candidates) == 0 {
 		return nil
 	}
@@ -360,7 +406,7 @@ func (s *streamReader) processChunk(chunk *StreamChunk) *types.StreamEvent {
 // buildResponse builds the final response from accumulated state.
 func (s *streamReader) buildResponse() {
 	s.response = &types.CompletionResponse{
-		Provider:   types.ProviderGoogle,
+		Provider:   types.ProviderVertex,
 		Model:      s.model,
 		Content:    s.content,
 		StopReason: s.stopReason,

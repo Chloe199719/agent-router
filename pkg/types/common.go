@@ -10,6 +10,7 @@ const (
 	ProviderOpenAI    Provider = "openai"
 	ProviderAnthropic Provider = "anthropic"
 	ProviderGoogle    Provider = "google"
+	ProviderVertex    Provider = "vertex"
 )
 
 // Role represents message roles in a conversation.

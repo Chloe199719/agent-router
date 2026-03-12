@@ -578,9 +578,9 @@ func TestTransformStopReason(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := transformer.transformStopReason(tt.reason)
+		result := transformer.TransformStopReason(tt.reason)
 		if result != tt.expected {
-			t.Errorf("transformStopReason(%q) = %q, expected %q", tt.reason, result, tt.expected)
+			t.Errorf("TransformStopReason(%q) = %q, expected %q", tt.reason, result, tt.expected)
 		}
 	}
 }

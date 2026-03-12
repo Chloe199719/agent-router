@@ -258,7 +258,7 @@ func (t *Transformer) TransformResponse(resp *GenerateContentResponse) *types.Co
 	result := &types.CompletionResponse{
 		Provider:   types.ProviderGoogle,
 		Content:    t.transformResponseContent(candidate.Content),
-		StopReason: t.transformStopReason(candidate.FinishReason),
+		StopReason: t.TransformStopReason(candidate.FinishReason),
 		ToolCalls:  t.extractToolCalls(candidate.Content),
 		CreatedAt:  time.Now(),
 	}
@@ -322,8 +322,8 @@ func (t *Transformer) extractToolCalls(content *Content) []types.ToolCall {
 	return calls
 }
 
-// transformStopReason converts Google finish reason to unified format.
-func (t *Transformer) transformStopReason(reason string) types.StopReason {
+// TransformStopReason converts Google finish reason to unified format.
+func (t *Transformer) TransformStopReason(reason string) types.StopReason {
 	switch reason {
 	case "STOP":
 		return types.StopReasonEnd

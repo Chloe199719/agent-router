@@ -140,6 +140,15 @@ type Config struct {
 
 	// Debug enables debug logging.
 	Debug bool
+
+	// ProjectID is the Google Cloud project ID (for Vertex AI).
+	ProjectID string
+
+	// Location is the Google Cloud region (for Vertex AI), e.g. "us-central1".
+	Location string
+
+	// AccessToken is an OAuth2 access token (alternative to APIKey, for Vertex AI).
+	AccessToken string
 }
 
 // Option is a function that configures a provider.
@@ -184,6 +193,27 @@ func WithMaxRetries(n int) Option {
 func WithDebug(debug bool) Option {
 	return func(c *Config) {
 		c.Debug = debug
+	}
+}
+
+// WithProjectID sets the Google Cloud project ID.
+func WithProjectID(id string) Option {
+	return func(c *Config) {
+		c.ProjectID = id
+	}
+}
+
+// WithLocation sets the Google Cloud region.
+func WithLocation(location string) Option {
+	return func(c *Config) {
+		c.Location = location
+	}
+}
+
+// WithAccessToken sets the OAuth2 access token.
+func WithAccessToken(token string) Option {
+	return func(c *Config) {
+		c.AccessToken = token
 	}
 }
 

@@ -6,6 +6,9 @@
 //		router.WithOpenAI(os.Getenv("OPENAI_API_KEY")),
 //		router.WithAnthropic(os.Getenv("ANTHROPIC_API_KEY")),
 //		router.WithGoogle(os.Getenv("GOOGLE_API_KEY")),
+//		router.WithVertex("my-project", "us-central1",
+//			provider.WithAccessToken(os.Getenv("VERTEX_ACCESS_TOKEN")),
+//		),
 //	)
 //	if err != nil {
 //		log.Fatal(err)
@@ -30,6 +33,7 @@ import (
 	"github.com/Chloe199719/agent-router/pkg/provider/anthropic"
 	"github.com/Chloe199719/agent-router/pkg/provider/google"
 	"github.com/Chloe199719/agent-router/pkg/provider/openai"
+	"github.com/Chloe199719/agent-router/pkg/provider/vertex"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
@@ -113,6 +117,23 @@ func WithGoogle(apiKey string, opts ...provider.Option) Option {
 		allOpts := append([]provider.Option{provider.WithAPIKey(apiKey)}, opts...)
 		client := google.New(allOpts...)
 		r.providers[types.ProviderGoogle] = client
+		r.batch.RegisterProvider(client)
+	}
+}
+
+// WithVertex adds Google Vertex AI as a provider.
+//
+// The projectID and location are required. Authentication can be provided via
+// provider.WithAccessToken() (OAuth2 Bearer token) or provider.WithAPIKey()
+// (API key) in the opts. Example:
+//
+//	router.WithVertex("my-project", "us-central1",
+//	    provider.WithAccessToken(os.Getenv("VERTEX_ACCESS_TOKEN")),
+//	)
+func WithVertex(projectID, location string, opts ...provider.Option) Option {
+	return func(r *Router) {
+		client := vertex.New(projectID, location, opts...)
+		r.providers[types.ProviderVertex] = client
 		r.batch.RegisterProvider(client)
 	}
 }
