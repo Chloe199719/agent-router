@@ -22,7 +22,8 @@ import (
 // This method:
 // 1. Transforms inline requests into JSONL format
 // 2. Uploads the JSONL to a GCS staging bucket
-// 3. Creates a batchPredictionJob referencing the GCS input
+// 3. Uploads a custom_ids mapping file for result correlation
+// 4. Creates a batchPredictionJob referencing the GCS input
 //
 // Requires BatchBucket to be configured via provider.WithBatchBucket().
 func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchRequest) (*provider.BatchJob, error) {
@@ -40,9 +41,10 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		model = "gemini-2.0-flash" // Default model
 	}
 
-	// Build JSONL content from requests
+	// Build JSONL content from requests and collect custom IDs
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
+	customIDs := make([]string, 0, len(requests))
 	for _, req := range requests {
 		gReq := c.transformer.TransformRequest(req.Request)
 		line := VertexBatchInputLine{
@@ -51,6 +53,7 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		if err := encoder.Encode(line); err != nil {
 			return nil, errors.ErrInvalidRequest("failed to marshal batch request line").WithCause(err)
 		}
+		customIDs = append(customIDs, req.CustomID)
 	}
 
 	// Upload JSONL to GCS
@@ -62,6 +65,17 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 
 	if err := c.uploadToGCS(ctx, bucket, inputPath, buf.Bytes()); err != nil {
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to upload batch input to GCS").WithCause(err)
+	}
+
+	// Upload custom_ids mapping file so we can correlate results back to requests.
+	// Vertex AI preserves input line order in output, so index-based mapping works.
+	customIDsPath := fmt.Sprintf("%s%s/custom_ids.json", prefix, batchID)
+	customIDsData, err := json.Marshal(customIDs)
+	if err != nil {
+		return nil, errors.ErrInvalidRequest("failed to marshal custom IDs").WithCause(err)
+	}
+	if err := c.uploadToGCS(ctx, bucket, customIDsPath, customIDsData); err != nil {
+		return nil, errors.ErrServerError(types.ProviderVertex, "failed to upload custom IDs mapping to GCS").WithCause(err)
 	}
 
 	// Create batch prediction job
@@ -112,7 +126,10 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
-	return c.convertVertexBatchJob(&job, model), nil
+	result := c.convertVertexBatchJob(&job, model)
+	result.Metadata["custom_ids_uri"] = fmt.Sprintf("gs://%s/%s", bucket, customIDsPath)
+
+	return result, nil
 }
 
 // GetBatch retrieves the status of a batch prediction job.
@@ -171,7 +188,24 @@ func (c *Client) GetBatchResults(ctx context.Context, batchID string) ([]provide
 	}
 
 	// Download and parse results from GCS
-	return c.downloadBatchResults(ctx, outputDir)
+	results, err := c.downloadBatchResults(ctx, outputDir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to load custom_ids mapping to correlate results back to requests.
+	// The mapping is stored alongside the input when the batch was created.
+	displayName, _ := job.Metadata["display_name"].(string)
+	customIDs := c.loadCustomIDs(ctx, displayName)
+	if len(customIDs) > 0 {
+		for i := range results {
+			if i < len(customIDs) {
+				results[i].CustomID = customIDs[i]
+			}
+		}
+	}
+
+	return results, nil
 }
 
 // downloadBatchResults downloads and parses JSONL results from a GCS output directory.
@@ -219,6 +253,31 @@ func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) 
 	}
 
 	return results, nil
+}
+
+// loadCustomIDs attempts to load the custom_ids.json mapping file from GCS.
+// The mapping file is stored at gs://{bucket}/{prefix}{displayName}/custom_ids.json
+// when CreateBatch is called. It returns nil if the mapping cannot be loaded
+// (e.g., batch was created externally or the bucket is not configured).
+func (c *Client) loadCustomIDs(ctx context.Context, displayName string) []string {
+	if c.config.BatchBucket == "" || displayName == "" {
+		return nil
+	}
+
+	bucket, prefix := parseBucketPath(c.config.BatchBucket)
+	mappingPath := fmt.Sprintf("%s%s/custom_ids.json", prefix, displayName)
+
+	data, err := c.downloadFromGCS(ctx, bucket, mappingPath)
+	if err != nil {
+		return nil
+	}
+
+	var ids []string
+	if json.Unmarshal(data, &ids) != nil {
+		return nil
+	}
+
+	return ids
 }
 
 // findBatchOutputFile lists objects in a GCS directory and returns the path of the prediction output file.

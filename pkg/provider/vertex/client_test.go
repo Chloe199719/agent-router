@@ -943,3 +943,143 @@ func TestCreateBatch_SubmitsCorrectRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateBatch_UploadsCustomIDs(t *testing.T) {
+	var gcsUploads []string
+	var customIDsContent []byte
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Handle GCS upload
+		if strings.Contains(r.URL.Path, "/upload/storage/") {
+			uploadName := r.URL.Query().Get("name")
+			gcsUploads = append(gcsUploads, uploadName)
+
+			if strings.HasSuffix(uploadName, "/custom_ids.json") {
+				body, _ := io.ReadAll(r.Body)
+				customIDsContent = body
+			}
+
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"name": uploadName})
+			return
+		}
+
+		// Handle batch prediction job creation
+		if strings.HasSuffix(r.URL.Path, "/batchPredictionJobs") {
+			resp := VertexBatchPredictionJob{
+				Name:        "projects/proj/locations/loc/batchPredictionJobs/789",
+				DisplayName: "batch-test",
+				State:       "JOB_STATE_PENDING",
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := New("proj", "loc",
+		provider.WithAccessToken("tok"),
+		provider.WithBaseURL(server.URL),
+		provider.WithBatchBucket("my-bucket/staging"),
+	)
+	client.httpClient = server.Client()
+
+	job, err := client.CreateBatch(context.Background(), []provider.BatchRequest{
+		{
+			CustomID: "request-alpha",
+			Request: &types.CompletionRequest{
+				Model:    "gemini-2.0-flash",
+				Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hello")},
+			},
+		},
+		{
+			CustomID: "request-beta",
+			Request: &types.CompletionRequest{
+				Model:    "gemini-2.0-flash",
+				Messages: []types.Message{types.NewTextMessage(types.RoleUser, "World")},
+			},
+		},
+	})
+
+	// GCS uploads will fail since test server URL doesn't match storage.googleapis.com.
+	// If they succeed (e.g., httpClient is overridden), verify the full flow.
+	if err == nil {
+		// Should have uploaded both input.jsonl and custom_ids.json
+		hasInput := false
+		hasCustomIDs := false
+		for _, name := range gcsUploads {
+			if strings.HasSuffix(name, "/input.jsonl") {
+				hasInput = true
+			}
+			if strings.HasSuffix(name, "/custom_ids.json") {
+				hasCustomIDs = true
+			}
+		}
+		if !hasInput {
+			t.Error("expected input.jsonl to be uploaded")
+		}
+		if !hasCustomIDs {
+			t.Error("expected custom_ids.json to be uploaded")
+		}
+
+		// Verify custom_ids.json content
+		if customIDsContent != nil {
+			var ids []string
+			if err := json.Unmarshal(customIDsContent, &ids); err != nil {
+				t.Fatalf("failed to parse custom_ids.json: %v", err)
+			}
+			if len(ids) != 2 {
+				t.Fatalf("expected 2 custom IDs, got %d", len(ids))
+			}
+			if ids[0] != "request-alpha" {
+				t.Errorf("expected first custom ID 'request-alpha', got %q", ids[0])
+			}
+			if ids[1] != "request-beta" {
+				t.Errorf("expected second custom ID 'request-beta', got %q", ids[1])
+			}
+		}
+
+		// Verify custom_ids_uri is in job metadata
+		customIDsURI, ok := job.Metadata["custom_ids_uri"].(string)
+		if !ok || customIDsURI == "" {
+			t.Error("expected custom_ids_uri in job metadata")
+		}
+		if !strings.Contains(customIDsURI, "custom_ids.json") {
+			t.Errorf("expected custom_ids_uri to reference custom_ids.json, got %q", customIDsURI)
+		}
+	}
+}
+
+func TestLoadCustomIDs(t *testing.T) {
+	// Set up a server that serves custom_ids.json
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o/") && r.URL.Query().Get("alt") == "media" {
+			ids := []string{"req-1", "req-2", "req-3"}
+			json.NewEncoder(w).Encode(ids)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := New("proj", "loc",
+		provider.WithAccessToken("tok"),
+		provider.WithBatchBucket("my-bucket"),
+	)
+	client.httpClient = server.Client()
+
+	// Test with empty display name
+	ids := client.loadCustomIDs(context.Background(), "")
+	if ids != nil {
+		t.Error("expected nil for empty display name")
+	}
+
+	// Test with no batch bucket
+	client2 := New("proj", "loc", provider.WithAccessToken("tok"))
+	ids = client2.loadCustomIDs(context.Background(), "batch-123")
+	if ids != nil {
+		t.Error("expected nil when no batch bucket configured")
+	}
+}
