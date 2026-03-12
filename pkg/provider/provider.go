@@ -149,6 +149,10 @@ type Config struct {
 
 	// AccessToken is an OAuth2 access token (alternative to APIKey, for Vertex AI).
 	AccessToken string
+
+	// BatchBucket is the GCS bucket for Vertex AI batch input/output staging.
+	// Required for Vertex AI batch operations. Example: "my-bucket" or "my-bucket/batch-staging".
+	BatchBucket string
 }
 
 // Option is a function that configures a provider.
@@ -214,6 +218,13 @@ func WithLocation(location string) Option {
 func WithAccessToken(token string) Option {
 	return func(c *Config) {
 		c.AccessToken = token
+	}
+}
+
+// WithBatchBucket sets the GCS bucket for Vertex AI batch staging.
+func WithBatchBucket(bucket string) Option {
+	return func(c *Config) {
+		c.BatchBucket = bucket
 	}
 }
 

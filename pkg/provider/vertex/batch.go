@@ -16,10 +16,21 @@ import (
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
-// CreateBatch creates a new batch job using inline requests.
+// CreateBatch creates a new batch prediction job using the Vertex AI batchPredictionJobs API.
+//
+// This method:
+// 1. Transforms inline requests into JSONL format
+// 2. Uploads the JSONL to a GCS staging bucket
+// 3. Creates a batchPredictionJob referencing the GCS input
+//
+// Requires BatchBucket to be configured via provider.WithBatchBucket().
 func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchRequest) (*provider.BatchJob, error) {
 	if len(requests) == 0 {
 		return nil, errors.ErrInvalidRequest("no requests provided").WithProvider(types.ProviderVertex)
+	}
+
+	if c.config.BatchBucket == "" {
+		return nil, errors.ErrInvalidRequest("batch bucket is required for Vertex AI batch operations; use provider.WithBatchBucket()").WithProvider(types.ProviderVertex)
 	}
 
 	// Get model from first request (all requests should use the same model)
@@ -28,36 +39,56 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		model = "gemini-2.0-flash" // Default model
 	}
 
-	// Build batch request items
-	batchItems := make([]googleProvider.BatchRequestItem, len(requests))
-	for i, req := range requests {
+	// Build JSONL content from requests
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	for _, req := range requests {
 		gReq := c.transformer.TransformRequest(req.Request)
-		batchItems[i] = googleProvider.BatchRequestItem{
+		line := VertexBatchInputLine{
 			Request: gReq,
-			Metadata: &googleProvider.RequestMetadata{
-				Key: req.CustomID,
-			},
+		}
+		if err := encoder.Encode(line); err != nil {
+			return nil, errors.ErrInvalidRequest("failed to marshal batch request line").WithCause(err)
 		}
 	}
 
-	// Create batch request
-	batchReq := &googleProvider.BatchGenerateContentRequest{
-		Batch: &googleProvider.BatchConfig{
-			DisplayName: fmt.Sprintf("batch-%d", time.Now().Unix()),
-			InputConfig: &googleProvider.InputConfig{
-				Requests: &googleProvider.RequestsInput{
-					Requests: batchItems,
-				},
+	// Upload JSONL to GCS
+	batchID := fmt.Sprintf("batch-%d", time.Now().UnixNano())
+	bucket, prefix := parseBucketPath(c.config.BatchBucket)
+	inputPath := fmt.Sprintf("%s%s/input.jsonl", prefix, batchID)
+	inputURI := fmt.Sprintf("gs://%s/%s", bucket, inputPath)
+	outputURIPrefix := fmt.Sprintf("gs://%s/%s%s/output/", bucket, prefix, batchID)
+
+	if err := c.uploadToGCS(ctx, bucket, inputPath, buf.Bytes()); err != nil {
+		return nil, errors.ErrServerError(types.ProviderVertex, "failed to upload batch input to GCS").WithCause(err)
+	}
+
+	// Create batch prediction job
+	modelPath := fmt.Sprintf("publishers/google/models/%s", model)
+
+	jobReq := &VertexBatchPredictionJobRequest{
+		DisplayName: batchID,
+		Model:       modelPath,
+		InputConfig: &VertexBatchInputConfig{
+			InstancesFormat: "jsonl",
+			GcsSource: &GcsSource{
+				URIs: []string{inputURI},
+			},
+		},
+		OutputConfig: &VertexBatchOutputConfig{
+			PredictionsFormat: "jsonl",
+			GcsDestination: &GcsDestination{
+				OutputURIPrefix: outputURIPrefix,
 			},
 		},
 	}
 
-	body, err := json.Marshal(batchReq)
+	body, err := json.Marshal(jobReq)
 	if err != nil {
-		return nil, errors.ErrInvalidRequest("failed to marshal batch request").WithCause(err)
+		return nil, errors.ErrInvalidRequest("failed to marshal batch prediction job request").WithCause(err)
 	}
 
-	url := c.buildURL(model, "batchGenerateContent")
+	url := c.batchJobsURL()
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, errors.ErrInvalidRequest("failed to create request").WithCause(err)
@@ -75,20 +106,18 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 		return nil, c.handleErrorResponse(resp)
 	}
 
-	var batchJob googleProvider.BatchJob
-	if err := json.NewDecoder(resp.Body).Decode(&batchJob); err != nil {
+	var job VertexBatchPredictionJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
-	return c.convertBatchJob(&batchJob, model), nil
+	return c.convertVertexBatchJob(&job, model), nil
 }
 
-// GetBatch retrieves the status of a batch job.
+// GetBatch retrieves the status of a batch prediction job.
 func (c *Client) GetBatch(ctx context.Context, batchID string) (*provider.BatchJob, error) {
-	// batchID should be a full operation name or a short ID
 	batchName := batchID
 	if !strings.HasPrefix(batchID, "projects/") {
-		// Try constructing the full name
 		batchName = fmt.Sprintf("projects/%s/locations/%s/batchPredictionJobs/%s",
 			c.projectID, c.location, batchID)
 	}
@@ -115,121 +144,67 @@ func (c *Client) GetBatch(ctx context.Context, batchID string) (*provider.BatchJ
 		return nil, c.handleErrorResponse(resp)
 	}
 
-	var batchJob googleProvider.BatchJob
-	if err := json.NewDecoder(resp.Body).Decode(&batchJob); err != nil {
+	var job VertexBatchPredictionJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
-	return c.convertBatchJob(&batchJob, ""), nil
+	return c.convertVertexBatchJob(&job, ""), nil
 }
 
-// GetBatchResults retrieves the results of a completed batch job.
+// GetBatchResults retrieves the results of a completed batch prediction job.
 func (c *Client) GetBatchResults(ctx context.Context, batchID string) ([]provider.BatchResult, error) {
 	job, err := c.GetBatch(ctx, batchID)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if job is complete
 	if job.Status != provider.BatchStatusCompleted {
 		return nil, errors.ErrInvalidRequest(fmt.Sprintf("batch job is not complete, status: %s", job.Status)).WithProvider(types.ProviderVertex)
 	}
 
-	// Get the batch job again to access internal response data
-	batchName := batchID
-	if !strings.HasPrefix(batchID, "projects/") {
-		batchName = fmt.Sprintf("projects/%s/locations/%s/batchPredictionJobs/%s",
-			c.projectID, c.location, batchID)
+	// Get output directory from metadata
+	outputDir, ok := job.Metadata["gcs_output_directory"].(string)
+	if !ok || outputDir == "" {
+		return nil, errors.ErrServerError(types.ProviderVertex, "no output directory found in batch job")
 	}
 
-	url := fmt.Sprintf("%s/%s", c.baseURL, batchName)
-	if c.config.AccessToken == "" && c.config.APIKey != "" {
-		url += "?key=" + c.config.APIKey
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, errors.ErrInvalidRequest("failed to create request").WithCause(err)
-	}
-
-	c.setHeaders(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, errors.ErrProviderUnavailable(types.ProviderVertex, "request failed").WithCause(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.handleErrorResponse(resp)
-	}
-
-	var batchJob googleProvider.BatchJob
-	if err := json.NewDecoder(resp.Body).Decode(&batchJob); err != nil {
-		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
-	}
-
-	// Check for inline responses
-	if batchJob.Response != nil && batchJob.Response.InlinedResponses != nil && len(batchJob.Response.InlinedResponses.InlinedResponses) > 0 {
-		return c.convertInlinedResponses(batchJob.Response.InlinedResponses.InlinedResponses), nil
-	}
-
-	// Check for file-based responses
-	if batchJob.Response != nil && batchJob.Response.ResponsesFile != "" {
-		return c.downloadBatchResults(ctx, batchJob.Response.ResponsesFile)
-	}
-
-	return nil, errors.ErrServerError(types.ProviderVertex, "no results found in batch response")
+	// Download and parse results from GCS
+	return c.downloadBatchResults(ctx, outputDir)
 }
 
-// downloadBatchResults downloads and parses results from a file.
-func (c *Client) downloadBatchResults(ctx context.Context, fileName string) ([]provider.BatchResult, error) {
-	// For Vertex AI, the download URL follows the Vertex AI pattern
-	url := fmt.Sprintf("%s/%s:download?alt=media", c.baseURL, fileName)
-	if c.config.AccessToken == "" && c.config.APIKey != "" {
-		url += "&key=" + c.config.APIKey
+// downloadBatchResults downloads and parses JSONL results from a GCS output directory.
+func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) ([]provider.BatchResult, error) {
+	// The output directory contains prediction results in JSONL format.
+	// Typically the file is at: {outputDir}/predictions.jsonl or similar.
+	// We try the common pattern first.
+	outputURI := strings.TrimSuffix(gcsOutputDir, "/") + "/predictions.jsonl"
+
+	bucket, objectPath := parseGCSURI(outputURI)
+	if bucket == "" {
+		return nil, errors.ErrServerError(types.ProviderVertex, "invalid GCS output URI: "+outputURI)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	content, err := c.downloadFromGCS(ctx, bucket, objectPath)
 	if err != nil {
-		return nil, errors.ErrInvalidRequest("failed to create download request").WithCause(err)
+		return nil, errors.ErrServerError(types.ProviderVertex, "failed to download batch results from GCS").WithCause(err)
 	}
 
-	c.setHeaders(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, errors.ErrProviderUnavailable(types.ProviderVertex, "download failed").WithCause(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.handleErrorResponse(resp)
-	}
-
-	content, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, errors.ErrServerError(types.ProviderVertex, "failed to read response").WithCause(err)
-	}
-
-	// Parse JSONL output
+	// Parse JSONL output - each line contains a prediction result
 	var results []provider.BatchResult
 	decoder := json.NewDecoder(bytes.NewReader(content))
 
 	for decoder.More() {
-		var line googleProvider.InlinedResponse
+		var line struct {
+			Response *googleProvider.GenerateContentResponse `json:"response,omitempty"`
+			Status   string                                  `json:"status,omitempty"`
+		}
 		if err := decoder.Decode(&line); err != nil {
 			continue
 		}
 
 		result := provider.BatchResult{}
-		if line.Metadata != nil {
-			result.CustomID = line.Metadata.Key
-		}
-
-		if line.Error != nil {
-			result.Error = errors.ErrServerError(types.ProviderVertex, line.Error.Message)
-		} else if line.Response != nil {
+		if line.Response != nil {
 			result.Response = c.transformer.TransformResponse(line.Response)
 			if result.Response != nil {
 				result.Response.Provider = types.ProviderVertex
@@ -242,28 +217,7 @@ func (c *Client) downloadBatchResults(ctx context.Context, fileName string) ([]p
 	return results, nil
 }
 
-// convertInlinedResponses converts inline responses to provider batch results.
-func (c *Client) convertInlinedResponses(responses []googleProvider.InlinedResponse) []provider.BatchResult {
-	results := make([]provider.BatchResult, len(responses))
-	for i, resp := range responses {
-		results[i] = provider.BatchResult{}
-		if resp.Metadata != nil {
-			results[i].CustomID = resp.Metadata.Key
-		}
-
-		if resp.Error != nil {
-			results[i].Error = errors.ErrServerError(types.ProviderVertex, resp.Error.Message)
-		} else if resp.Response != nil {
-			results[i].Response = c.transformer.TransformResponse(resp.Response)
-			if results[i].Response != nil {
-				results[i].Response.Provider = types.ProviderVertex
-			}
-		}
-	}
-	return results
-}
-
-// CancelBatch cancels a batch job.
+// CancelBatch cancels a batch prediction job.
 func (c *Client) CancelBatch(ctx context.Context, batchID string) error {
 	batchName := batchID
 	if !strings.HasPrefix(batchID, "projects/") {
@@ -296,7 +250,7 @@ func (c *Client) CancelBatch(ctx context.Context, batchID string) error {
 	return nil
 }
 
-// ListBatches lists all batch jobs.
+// ListBatches lists batch prediction jobs.
 func (c *Client) ListBatches(ctx context.Context, opts *provider.ListBatchOptions) ([]provider.BatchJob, error) {
 	url := fmt.Sprintf("%s/projects/%s/locations/%s/batchPredictionJobs",
 		c.baseURL, c.projectID, c.location)
@@ -334,85 +288,175 @@ func (c *Client) ListBatches(ctx context.Context, opts *provider.ListBatchOption
 		return nil, c.handleErrorResponse(resp)
 	}
 
-	var listResp googleProvider.BatchListResponse
+	var listResp VertexBatchPredictionJobList
 	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
 		return nil, errors.ErrServerError(types.ProviderVertex, "failed to decode response").WithCause(err)
 	}
 
-	jobs := make([]provider.BatchJob, len(listResp.Batches))
-	for i, batch := range listResp.Batches {
-		jobs[i] = *c.convertBatchJob(&batch, "")
+	jobs := make([]provider.BatchJob, len(listResp.BatchPredictionJobs))
+	for i, job := range listResp.BatchPredictionJobs {
+		jobs[i] = *c.convertVertexBatchJob(&job, "")
 	}
 
 	return jobs, nil
 }
 
-// convertBatchJob converts Google batch job to provider batch job.
-func (c *Client) convertBatchJob(batch *googleProvider.BatchJob, model string) *provider.BatchJob {
-	job := &provider.BatchJob{
-		ID:       batch.Name,
+// batchJobsURL returns the URL for the batchPredictionJobs endpoint.
+func (c *Client) batchJobsURL() string {
+	url := fmt.Sprintf("%s/projects/%s/locations/%s/batchPredictionJobs",
+		c.baseURL, c.projectID, c.location)
+
+	if c.config.AccessToken == "" && c.config.APIKey != "" {
+		url += "?key=" + c.config.APIKey
+	}
+
+	return url
+}
+
+// uploadToGCS uploads data to a GCS bucket using the JSON API.
+func (c *Client) uploadToGCS(ctx context.Context, bucket, objectPath string, data []byte) error {
+	url := fmt.Sprintf("https://storage.googleapis.com/upload/storage/v1/b/%s/o?uploadType=media&name=%s",
+		bucket, objectPath)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("create upload request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/jsonl")
+	if c.config.AccessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.config.AccessToken)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GCS upload failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// downloadFromGCS downloads an object from GCS using the JSON API.
+func (c *Client) downloadFromGCS(ctx context.Context, bucket, objectPath string) ([]byte, error) {
+	url := fmt.Sprintf("https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media",
+		bucket, objectPath)
+
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create download request: %w", err)
+	}
+
+	if c.config.AccessToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.config.AccessToken)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("download request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GCS download failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// convertVertexBatchJob converts a Vertex AI batch prediction job to a provider BatchJob.
+func (c *Client) convertVertexBatchJob(job *VertexBatchPredictionJob, model string) *provider.BatchJob {
+	result := &provider.BatchJob{
+		ID:       job.Name,
 		Provider: types.ProviderVertex,
-		Status:   c.convertBatchStatus(batch),
+		Status:   c.convertVertexJobState(job.State),
 		Metadata: make(map[string]any),
 	}
 
-	if batch.Metadata != nil {
-		job.Metadata["display_name"] = batch.Metadata.DisplayName
-		job.Metadata["state"] = batch.Metadata.State
-
-		if batch.Metadata.CreateTime != "" {
-			if t, err := time.Parse(time.RFC3339, batch.Metadata.CreateTime); err == nil {
-				job.CreatedAt = t.Unix()
-			}
-		}
+	if job.DisplayName != "" {
+		result.Metadata["display_name"] = job.DisplayName
 	}
-
+	if job.State != "" {
+		result.Metadata["state"] = job.State
+	}
 	if model != "" {
-		job.Metadata["model"] = model
+		result.Metadata["model"] = model
+	} else if job.Model != "" {
+		result.Metadata["model"] = job.Model
+	}
+	if job.OutputInfo != nil && job.OutputInfo.GcsOutputDirectory != "" {
+		result.Metadata["gcs_output_directory"] = job.OutputInfo.GcsOutputDirectory
 	}
 
-	if batch.Response != nil {
-		if batch.Response.ResponsesFile != "" {
-			job.Metadata["responses_file"] = batch.Response.ResponsesFile
+	if job.CreateTime != "" {
+		if t, err := time.Parse(time.RFC3339, job.CreateTime); err == nil {
+			result.CreatedAt = t.Unix()
 		}
-		if batch.Response.InlinedResponses != nil && len(batch.Response.InlinedResponses.InlinedResponses) > 0 {
-			job.RequestCounts.Total = len(batch.Response.InlinedResponses.InlinedResponses)
-			job.RequestCounts.Completed = len(batch.Response.InlinedResponses.InlinedResponses)
+	}
+	if job.EndTime != "" {
+		if t, err := time.Parse(time.RFC3339, job.EndTime); err == nil {
+			result.CompletedAt = t.Unix()
 		}
 	}
 
-	return job
+	if job.Error != nil {
+		result.Metadata["error_code"] = job.Error.Code
+		result.Metadata["error_message"] = job.Error.Message
+	}
+
+	return result
 }
 
-// convertBatchStatus converts Google batch status to provider status.
-func (c *Client) convertBatchStatus(batch *googleProvider.BatchJob) provider.BatchStatus {
-	// Check if done first
-	if batch.Done {
-		if batch.Error != nil {
-			return provider.BatchStatusFailed
-		}
+// convertVertexJobState converts a Vertex AI job state to a provider BatchStatus.
+func (c *Client) convertVertexJobState(state string) provider.BatchStatus {
+	switch state {
+	case "JOB_STATE_PENDING", "JOB_STATE_QUEUED":
+		return provider.BatchStatusPending
+	case "JOB_STATE_RUNNING", "JOB_STATE_UPDATING":
+		return provider.BatchStatusInProgress
+	case "JOB_STATE_SUCCEEDED":
 		return provider.BatchStatusCompleted
+	case "JOB_STATE_FAILED", "JOB_STATE_PARTIALLY_SUCCEEDED":
+		return provider.BatchStatusFailed
+	case "JOB_STATE_CANCELLED", "JOB_STATE_CANCELLING":
+		return provider.BatchStatusCancelled
+	case "JOB_STATE_EXPIRED":
+		return provider.BatchStatusExpired
+	default:
+		return provider.BatchStatusPending
 	}
+}
 
-	// Check metadata state - handle both JOB_STATE_* and BATCH_STATE_* prefixes
-	if batch.Metadata != nil {
-		switch batch.Metadata.State {
-		case "JOB_STATE_PENDING", "BATCH_STATE_PENDING":
-			return provider.BatchStatusPending
-		case "JOB_STATE_RUNNING", "BATCH_STATE_RUNNING":
-			return provider.BatchStatusInProgress
-		case "JOB_STATE_SUCCEEDED", "BATCH_STATE_SUCCEEDED":
-			return provider.BatchStatusCompleted
-		case "JOB_STATE_FAILED", "BATCH_STATE_FAILED":
-			return provider.BatchStatusFailed
-		case "JOB_STATE_CANCELLED", "BATCH_STATE_CANCELLED":
-			return provider.BatchStatusCancelled
-		case "JOB_STATE_EXPIRED", "BATCH_STATE_EXPIRED":
-			return provider.BatchStatusExpired
+// parseBucketPath splits a bucket config like "my-bucket/staging/path" into bucket and prefix.
+func parseBucketPath(bucketPath string) (bucket, prefix string) {
+	parts := strings.SplitN(bucketPath, "/", 2)
+	bucket = parts[0]
+	if len(parts) > 1 {
+		prefix = parts[1]
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
 		}
 	}
+	return
+}
 
-	return provider.BatchStatusPending
+// parseGCSURI parses a gs:// URI into bucket and object path.
+func parseGCSURI(uri string) (bucket, objectPath string) {
+	if !strings.HasPrefix(uri, "gs://") {
+		return "", ""
+	}
+	path := strings.TrimPrefix(uri, "gs://")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) != 2 {
+		return parts[0], ""
+	}
+	return parts[0], parts[1]
 }
 
 // Ensure Client implements provider.BatchProvider
