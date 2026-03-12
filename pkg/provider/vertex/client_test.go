@@ -143,6 +143,7 @@ func TestBuildURL_DifferentLocations(t *testing.T) {
 		{"us-central1", "https://us-central1-aiplatform.googleapis.com/v1"},
 		{"europe-west1", "https://europe-west1-aiplatform.googleapis.com/v1"},
 		{"asia-southeast1", "https://asia-southeast1-aiplatform.googleapis.com/v1"},
+		{"global", "https://aiplatform.googleapis.com/v1"},
 	}
 
 	for _, tt := range tests {
@@ -150,6 +151,17 @@ func TestBuildURL_DifferentLocations(t *testing.T) {
 		if client.baseURL != tt.expected {
 			t.Errorf("location %q: expected base URL %q, got %q", tt.location, tt.expected, client.baseURL)
 		}
+	}
+}
+
+func TestBuildURL_GlobalLocation(t *testing.T) {
+	client := New("my-project", "global", provider.WithAccessToken("test-token"))
+
+	url := client.buildURL("gemini-2.0-flash", "generateContent")
+	expected := "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/publishers/google/models/gemini-2.0-flash:generateContent"
+
+	if url != expected {
+		t.Errorf("expected URL:\n  %s\ngot:\n  %s", expected, url)
 	}
 }
 
@@ -771,6 +783,9 @@ func TestParseBucketPath(t *testing.T) {
 		{"my-bucket/staging", "my-bucket", "staging/"},
 		{"my-bucket/staging/path", "my-bucket", "staging/path/"},
 		{"my-bucket/staging/path/", "my-bucket", "staging/path/"},
+		{"gs://my-bucket", "my-bucket", ""},
+		{"gs://my-bucket/staging", "my-bucket", "staging/"},
+		{"gs://my-bucket/staging/path", "my-bucket", "staging/path/"},
 	}
 
 	for _, tt := range tests {

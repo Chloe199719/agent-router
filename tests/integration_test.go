@@ -23,6 +23,8 @@ import (
 	"github.com/joho/godotenv"
 
 	router "github.com/Chloe199719/agent-router"
+	"github.com/Chloe199719/agent-router/pkg/batch"
+	"github.com/Chloe199719/agent-router/pkg/provider"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
@@ -37,6 +39,7 @@ const (
 	openAIModel    = "gpt-4o-mini"
 	anthropicModel = "claude-3-5-haiku-20241022"
 	googleModel    = "gemini-2.0-flash"
+	vertexModel    = "gemini-2.0-flash"
 
 	// Short timeout for tests
 	testTimeout = 60 * time.Second
@@ -56,6 +59,22 @@ func getRouter(t *testing.T) *router.Router {
 	}
 	if key := os.Getenv("GOOGLE_API_KEY"); key != "" {
 		opts = append(opts, router.WithGoogle(key))
+	}
+
+	// Vertex AI requires project ID, location, and an access token
+	if projectID := os.Getenv("VERTEX_PROJECT_ID"); projectID != "" {
+		location := os.Getenv("VERTEX_LOCATION")
+		if location == "" {
+			location = "global"
+		}
+		var vertexOpts []provider.Option
+		if token := os.Getenv("VERTEX_ACCESS_TOKEN"); token != "" {
+			vertexOpts = append(vertexOpts, provider.WithAccessToken(token))
+		}
+		if bucket := os.Getenv("VERTEX_BATCH_BUCKET"); bucket != "" {
+			vertexOpts = append(vertexOpts, provider.WithBatchBucket(bucket))
+		}
+		opts = append(opts, router.WithVertex(projectID, location, vertexOpts...))
 	}
 
 	if len(opts) == 0 {
@@ -859,3 +878,222 @@ func TestOpenAI_StopSequences(t *testing.T) {
 	t.Logf("Response (should stop at 3): %s", text)
 	t.Logf("Stop reason: %s", resp.StopReason)
 }
+
+// ============================================================================
+// Vertex AI Tests
+// ============================================================================
+
+func TestVertex_BasicCompletion(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderVertex,
+		Model:     vertexModel,
+		MaxTokens: types.Ptr(50),
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Say 'hello' and nothing else."),
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("Completion failed: %v", err)
+	}
+
+	// Note: Vertex AI does not return a response ID like OpenAI does
+	text := resp.Text()
+	if text == "" {
+		t.Error("Response text is empty")
+	}
+	if !strings.Contains(strings.ToLower(text), "hello") {
+		t.Errorf("Expected 'hello' in response, got: %s", text)
+	}
+
+	t.Logf("Response: %s", text)
+	t.Logf("Usage: %d input, %d output tokens", resp.Usage.InputTokens, resp.Usage.OutputTokens)
+}
+
+func TestVertex_Streaming(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	stream, err := r.Stream(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderVertex,
+		Model:     vertexModel,
+		MaxTokens: types.Ptr(50),
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Count from 1 to 5."),
+		},
+	})
+
+	if err != nil {
+		t.Fatalf("Stream failed: %v", err)
+	}
+	defer stream.Close()
+
+	var chunks int
+	var text strings.Builder
+
+	for {
+		event, err := stream.Next()
+		if err != nil {
+			t.Fatalf("Stream error: %v", err)
+		}
+		if event == nil {
+			break
+		}
+
+		switch event.Type {
+		case types.StreamEventContentDelta:
+			chunks++
+			if event.Delta != nil {
+				text.WriteString(event.Delta.Text)
+			}
+		case types.StreamEventDone:
+			t.Logf("Stream done, stop reason: %s", event.StopReason)
+		}
+	}
+
+	if chunks == 0 {
+		t.Error("No content chunks received")
+	}
+
+	t.Logf("Received %d chunks, text: %s", chunks, text.String())
+}
+
+func TestVertex_ToolCalling(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, (&types.CompletionRequest{
+		Provider:  types.ProviderVertex,
+		Model:     vertexModel,
+		MaxTokens: types.Ptr(100),
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "What's the weather in Paris?"),
+		},
+	}).WithTools(getWeatherTool()))
+
+	if err != nil {
+		t.Fatalf("Completion failed: %v", err)
+	}
+
+	if !resp.HasToolCalls() {
+		t.Fatalf("Expected tool calls, got none. Response: %s", resp.Text())
+	}
+
+	tc := resp.ToolCalls[0]
+	if tc.Name != "get_weather" {
+		t.Errorf("Expected tool name 'get_weather', got '%s'", tc.Name)
+	}
+
+	t.Logf("Tool call: %s(%v)", tc.Name, tc.Input)
+}
+
+// ============================================================================
+// Vertex AI Batch Tests
+// ============================================================================
+
+func TestVertex_BatchCreate(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+	if os.Getenv("VERTEX_BATCH_BUCKET") == "" {
+		t.Skip("VERTEX_BATCH_BUCKET not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// Vertex AI batch predictions require a versioned model name (e.g. gemini-2.0-flash-001),
+	// not the alias (e.g. gemini-2.0-flash) which works for non-batch endpoints.
+	batchModel := "gemini-2.0-flash-001"
+
+	requests := []batch.Request{
+		{
+			CustomID: "test-req-1",
+			Request: &types.CompletionRequest{
+				Provider:  types.ProviderVertex,
+				Model:     batchModel,
+				MaxTokens: types.Ptr(50),
+				Messages: []types.Message{
+					types.NewTextMessage(types.RoleUser, "Say 'hello' and nothing else."),
+				},
+			},
+		},
+		{
+			CustomID: "test-req-2",
+			Request: &types.CompletionRequest{
+				Provider:  types.ProviderVertex,
+				Model:     batchModel,
+				MaxTokens: types.Ptr(50),
+				Messages: []types.Message{
+					types.NewTextMessage(types.RoleUser, "Say 'world' and nothing else."),
+				},
+			},
+		},
+	}
+
+	job, err := r.Batch().Create(ctx, types.ProviderVertex, requests)
+	if err != nil {
+		t.Fatalf("Batch create failed: %v", err)
+	}
+
+	if job.ID == "" {
+		t.Error("Batch job ID is empty")
+	}
+	if job.Provider != types.ProviderVertex {
+		t.Errorf("Expected provider vertex, got %s", job.Provider)
+	}
+
+	t.Logf("Batch job created: ID=%s, Status=%s", job.ID, job.Status)
+	t.Logf("Metadata: %v", job.Metadata)
+
+	// Verify we can retrieve the job status
+	fetchedJob, err := r.Batch().Get(ctx, types.ProviderVertex, job.ID)
+	if err != nil {
+		t.Fatalf("Batch get failed: %v", err)
+	}
+
+	t.Logf("Batch job fetched: ID=%s, Status=%s", fetchedJob.ID, fetchedJob.Status)
+}
+
+func TestVertex_BatchList(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	jobs, err := r.Batch().List(ctx, types.ProviderVertex, &batch.ListOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Batch list failed: %v", err)
+	}
+
+	t.Logf("Found %d batch jobs", len(jobs))
+	for i, job := range jobs {
+		t.Logf("  [%d] ID=%s Status=%s", i, job.ID, job.Status)
+	}
+}
+
+// Ensure batch and provider imports are used
+var _ = batch.Request{}
+var _ = provider.WithAccessToken

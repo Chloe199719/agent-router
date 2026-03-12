@@ -434,7 +434,11 @@ func (c *Client) convertVertexJobState(state string) provider.BatchStatus {
 }
 
 // parseBucketPath splits a bucket config like "my-bucket/staging/path" into bucket and prefix.
+// It also handles the gs:// URI format (e.g., "gs://my-bucket/staging/path").
 func parseBucketPath(bucketPath string) (bucket, prefix string) {
+	// Strip gs:// prefix if present
+	bucketPath = strings.TrimPrefix(bucketPath, "gs://")
+
 	parts := strings.SplitN(bucketPath, "/", 2)
 	bucket = parts[0]
 	if len(parts) > 1 {

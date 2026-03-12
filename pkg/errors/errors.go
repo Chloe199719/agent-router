@@ -45,10 +45,16 @@ type RouterError struct {
 }
 
 func (e *RouterError) Error() string {
+	var base string
 	if e.Provider != "" {
-		return fmt.Sprintf("[%s] %s: %s", e.Provider, e.Code, e.Message)
+		base = fmt.Sprintf("[%s] %s: %s", e.Provider, e.Code, e.Message)
+	} else {
+		base = fmt.Sprintf("%s: %s", e.Code, e.Message)
 	}
-	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+	if e.Cause != nil {
+		return fmt.Sprintf("%s: %s", base, e.Cause.Error())
+	}
+	return base
 }
 
 func (e *RouterError) Unwrap() error {

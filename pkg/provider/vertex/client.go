@@ -7,6 +7,10 @@
 // URL pattern:
 //
 //	https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL}:{ACTION}
+//
+// For the "global" location, the URL uses no location prefix:
+//
+//	https://aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/global/publishers/google/models/{MODEL}:{ACTION}
 package vertex
 
 import (
@@ -52,7 +56,11 @@ func New(projectID, location string, opts ...provider.Option) *Client {
 
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
-		baseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1", location)
+		if location == "global" {
+			baseURL = "https://aiplatform.googleapis.com/v1"
+		} else {
+			baseURL = fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1", location)
+		}
 	}
 
 	httpClient := cfg.HTTPClient
