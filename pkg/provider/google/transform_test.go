@@ -455,6 +455,36 @@ func TestTransformRequest_JSONSchemaResponseFormat(t *testing.T) {
 	}
 }
 
+func TestApplyMetadataAsLabels(t *testing.T) {
+	transformer := NewTransformer()
+
+	req := &types.CompletionRequest{
+		Model:    "gemini-2.0-flash",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Metadata: map[string]string{
+			"env":   "prod",
+			"trace": "abc-123",
+		},
+	}
+
+	gReq := transformer.TransformRequest(req)
+	if len(gReq.Labels) != 0 {
+		t.Fatalf("TransformRequest must not set labels (Vertex-only); got %v", gReq.Labels)
+	}
+
+	ApplyMetadataAsLabels(gReq, req.Metadata)
+
+	if len(gReq.Labels) != 2 {
+		t.Fatalf("expected 2 labels, got %d (%v)", len(gReq.Labels), gReq.Labels)
+	}
+	if gReq.Labels["env"] != "prod" {
+		t.Errorf("expected label env=prod, got %q", gReq.Labels["env"])
+	}
+	if gReq.Labels["trace"] != "abc-123" {
+		t.Errorf("expected label trace=abc-123, got %q", gReq.Labels["trace"])
+	}
+}
+
 func TestTransformResponse(t *testing.T) {
 	transformer := NewTransformer()
 

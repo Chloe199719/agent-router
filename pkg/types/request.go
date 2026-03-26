@@ -28,6 +28,12 @@ type CompletionRequest struct {
 	// Streaming
 	Stream bool `json:"stream,omitempty"`
 
+	// Metadata is optional string key-value data sent to providers that support it:
+	// Vertex AI Gemini as request labels; OpenAI as chat completion metadata;
+	// Anthropic only forwards the "user_id" key to metadata.user_id.
+	// The Google Generative Language API (AI Studio) does not accept labels; Metadata is ignored there.
+	Metadata map[string]string `json:"metadata,omitempty"`
+
 	// Provider-specific options (passed through without modification)
 	Extra map[string]any `json:"extra,omitempty"`
 }

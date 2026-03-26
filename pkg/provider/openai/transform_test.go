@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/Chloe199719/agent-router/pkg/types"
@@ -351,6 +352,37 @@ func TestTransformRequest_ToolChoiceSpecific(t *testing.T) {
 
 	if tc.Function.Name != "get_weather" {
 		t.Errorf("expected function name 'get_weather', got %q", tc.Function.Name)
+	}
+}
+
+func TestTransformRequest_Metadata(t *testing.T) {
+	transformer := NewTransformer()
+
+	req := &types.CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Metadata: map[string]string{
+			"session": "sess-1",
+			"env":     "test",
+		},
+	}
+
+	result := transformer.TransformRequest(req)
+
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	meta, ok := decoded["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata object in JSON, got %T", decoded["metadata"])
+	}
+	if meta["session"] != "sess-1" || meta["env"] != "test" {
+		t.Errorf("metadata = %v", meta)
 	}
 }
 

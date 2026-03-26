@@ -83,6 +83,9 @@ type Result struct {
 	// CustomID matches the request's CustomID.
 	CustomID string `json:"custom_id"`
 
+	// RequestLabels is echoed request labels from the provider (e.g. Vertex batch output).
+	RequestLabels map[string]string `json:"request_labels,omitempty"`
+
 	// Response is the completion response (if successful).
 	Response *types.CompletionResponse `json:"response,omitempty"`
 
@@ -264,9 +267,10 @@ func convertResults(results []provider.BatchResult) []Result {
 	out := make([]Result, len(results))
 	for i, r := range results {
 		out[i] = Result{
-			CustomID: r.CustomID,
-			Response: r.Response,
-			Error:    r.Error,
+			CustomID:      r.CustomID,
+			RequestLabels: r.RequestLabels,
+			Response:      r.Response,
+			Error:         r.Error,
 		}
 	}
 	return out

@@ -115,6 +115,7 @@ func (c *Client) Models() []string {
 // Complete sends a completion request.
 func (c *Client) Complete(ctx context.Context, req *types.CompletionRequest) (*types.CompletionResponse, error) {
 	gReq := c.transformer.TransformRequest(req)
+	googleProvider.ApplyMetadataAsLabels(gReq, req.Metadata)
 
 	body, err := json.Marshal(gReq)
 	if err != nil {
@@ -155,6 +156,7 @@ func (c *Client) Complete(ctx context.Context, req *types.CompletionRequest) (*t
 // Stream sends a streaming completion request.
 func (c *Client) Stream(ctx context.Context, req *types.CompletionRequest) (types.StreamReader, error) {
 	gReq := c.transformer.TransformRequest(req)
+	googleProvider.ApplyMetadataAsLabels(gReq, req.Metadata)
 
 	body, err := json.Marshal(gReq)
 	if err != nil {

@@ -108,6 +108,10 @@ type BatchResult struct {
 	// CustomID matches the request's custom_id.
 	CustomID string `json:"custom_id"`
 
+	// RequestLabels is the echoed request labels from the provider output, when available
+	// (e.g. Vertex AI batch JSONL includes the original generateContent request with labels).
+	RequestLabels map[string]string `json:"request_labels,omitempty"`
+
 	// Response is the completion response (if successful).
 	Response *types.CompletionResponse `json:"response,omitempty"`
 

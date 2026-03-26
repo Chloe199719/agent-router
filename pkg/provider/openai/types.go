@@ -20,6 +20,7 @@ type ChatCompletionRequest struct {
 	ToolChoice        any             `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	Seed              *int            `json:"seed,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
 }
 
 // StreamOptions configures streaming behavior.

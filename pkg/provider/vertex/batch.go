@@ -13,6 +13,7 @@ import (
 
 	"github.com/Chloe199719/agent-router/pkg/errors"
 	"github.com/Chloe199719/agent-router/pkg/provider"
+	googleProvider "github.com/Chloe199719/agent-router/pkg/provider/google"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
@@ -46,6 +47,7 @@ func (c *Client) CreateBatch(ctx context.Context, requests []provider.BatchReque
 	encoder := json.NewEncoder(&buf)
 	for _, req := range requests {
 		gReq := c.transformer.TransformRequest(req.Request)
+		googleProvider.ApplyMetadataAsLabels(gReq, req.Request.Metadata)
 		if req.CustomID != "" {
 			if gReq.Labels == nil {
 				gReq.Labels = make(map[string]string)
@@ -216,8 +218,11 @@ func (c *Client) downloadBatchResults(ctx context.Context, gcsOutputDir string) 
 
 		result := provider.BatchResult{}
 
-		// Extract custom_id from the echoed request's labels
-		if line.Request != nil {
+		if line.Request != nil && len(line.Request.Labels) > 0 {
+			result.RequestLabels = make(map[string]string, len(line.Request.Labels))
+			for k, v := range line.Request.Labels {
+				result.RequestLabels[k] = v
+			}
 			if customID, ok := line.Request.Labels["custom_id"]; ok {
 				result.CustomID = customID
 			}

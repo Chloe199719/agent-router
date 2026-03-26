@@ -51,6 +51,13 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *ChatComple
 		oaiReq.ToolChoice = t.transformToolChoice(req.ToolChoice)
 	}
 
+	if len(req.Metadata) > 0 {
+		oaiReq.Metadata = make(map[string]string, len(req.Metadata))
+		for k, v := range req.Metadata {
+			oaiReq.Metadata[k] = v
+		}
+	}
+
 	return oaiReq
 }
 

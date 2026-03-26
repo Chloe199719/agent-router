@@ -57,6 +57,10 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *MessagesRe
 		anthReq.ToolChoice = t.transformToolChoice(req.ToolChoice)
 	}
 
+	if uid := req.Metadata["user_id"]; uid != "" {
+		anthReq.Metadata = &Metadata{UserID: uid}
+	}
+
 	return anthReq
 }
 

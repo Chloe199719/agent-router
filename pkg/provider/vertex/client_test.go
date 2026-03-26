@@ -1118,6 +1118,12 @@ func TestDownloadBatchResults_ExtractsCustomID(t *testing.T) {
 		if r.CustomID == "" {
 			t.Error("expected non-empty custom_id on result")
 		}
+		if r.RequestLabels == nil || r.RequestLabels["custom_id"] != r.CustomID {
+			t.Errorf("RequestLabels missing custom_id: CustomID=%q labels=%v", r.CustomID, r.RequestLabels)
+		}
+		if len(r.RequestLabels) != 1 {
+			t.Errorf("expected 1 label in echoed request, got %v", r.RequestLabels)
+		}
 		resultMap[r.CustomID] = r.Response
 	}
 
@@ -1131,5 +1137,87 @@ func TestDownloadBatchResults_ExtractsCustomID(t *testing.T) {
 		t.Error("missing result for 'request-beta'")
 	} else if resp.Text() != "Response to World" {
 		t.Errorf("expected 'Response to World', got %q", resp.Text())
+	}
+}
+
+func TestDownloadBatchResults_EchoedLabelsIncludeMetadata(t *testing.T) {
+	// Vertex echoes the full request labels (custom_id + user metadata from CreateBatch).
+	outputJSONL := strings.Join([]string{
+		`{"status":"","request":{"contents":[{"parts":[{"text":"A"}],"role":"user"}],"labels":{"custom_id":"meta-a","agent_router_itest":"vertex-batch","batch_extra_label":"one"}},"response":{"candidates":[{"content":{"parts":[{"text":"Out A"}],"role":"model"},"finishReason":"STOP"}]}}`,
+		`{"status":"","request":{"contents":[{"parts":[{"text":"B"}],"role":"user"}],"labels":{"custom_id":"meta-b","agent_router_itest":"vertex-batch","batch_extra_label":"two"}},"response":{"candidates":[{"content":{"parts":[{"text":"Out B"}],"role":"model"},"finishReason":"STOP"}]}}`,
+	}, "\n")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/batchPredictionJobs/") && !strings.HasSuffix(r.URL.Path, "/batchPredictionJobs") {
+			_ = json.NewEncoder(w).Encode(VertexBatchPredictionJob{
+				Name:  "projects/proj/locations/loc/batchPredictionJobs/999",
+				State: "JOB_STATE_SUCCEEDED",
+				OutputInfo: &VertexBatchOutputInfo{
+					GcsOutputDirectory: "gs://my-bucket/out/",
+				},
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o") && r.URL.Query().Get("alt") != "media" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]string{{"name": "out/prediction-model-001"}},
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/storage/v1/b/my-bucket/o/") && r.URL.Query().Get("alt") == "media" {
+			_, _ = w.Write([]byte(outputJSONL))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := New("proj", "loc",
+		provider.WithAccessToken("tok"),
+		provider.WithBaseURL(server.URL),
+		provider.WithBatchBucket("my-bucket/staging"),
+	)
+	client.httpClient = &http.Client{
+		Transport: &rewriteTransport{
+			targetURL: server.URL[len("http://"):],
+			transport: http.DefaultTransport,
+		},
+	}
+
+	results, err := client.GetBatchResults(context.Background(), "projects/proj/locations/loc/batchPredictionJobs/999")
+	if err != nil {
+		t.Fatalf("GetBatchResults: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	byID := make(map[string]provider.BatchResult)
+	for _, res := range results {
+		byID[res.CustomID] = res
+	}
+
+	for _, id := range []string{"meta-a", "meta-b"} {
+		r, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing result for custom_id %q", id)
+		}
+		labels := r.RequestLabels
+		if labels == nil {
+			t.Fatalf("expected RequestLabels for %q", id)
+		}
+		if labels["custom_id"] != id {
+			t.Errorf("%q: custom_id label = %q", id, labels["custom_id"])
+		}
+		if labels["agent_router_itest"] != "vertex-batch" {
+			t.Errorf("%q: agent_router_itest = %q", id, labels["agent_router_itest"])
+		}
+		wantExtra := map[string]string{"meta-a": "one", "meta-b": "two"}[id]
+		if labels["batch_extra_label"] != wantExtra {
+			t.Errorf("%q: batch_extra_label = %q want %q", id, labels["batch_extra_label"], wantExtra)
+		}
+		if len(labels) != 3 {
+			t.Errorf("%q: expected 3 labels, got %d: %v", id, len(labels), labels)
+		}
 	}
 }

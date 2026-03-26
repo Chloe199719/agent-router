@@ -7,6 +7,7 @@
 //   - OPENAI_API_KEY
 //   - ANTHROPIC_API_KEY
 //   - GOOGLE_API_KEY (optional)
+//   - VERTEX_BATCH_WAIT_RESULTS=1 — run slow Vertex batch GetResults / RequestLabels checks (optional)
 //
 //go:build integration
 
@@ -37,9 +38,9 @@ func init() {
 // Test configuration - using cheapest/fastest models
 const (
 	openAIModel    = "gpt-4o-mini"
-	anthropicModel = "claude-3-5-haiku-20241022"
-	googleModel    = "gemini-2.0-flash"
-	vertexModel    = "gemini-2.0-flash"
+	anthropicModel = "claude-haiku-4-5"
+	googleModel    = "gemini-3.1-flash-lite-preview"
+	vertexModel    = "gemini-3.1-flash-lite-preview"
 
 	// Short timeout for tests
 	testTimeout = 60 * time.Second

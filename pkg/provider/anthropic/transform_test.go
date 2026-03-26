@@ -314,6 +314,44 @@ func TestTransformRequest_ToolChoiceSpecific(t *testing.T) {
 	}
 }
 
+func TestTransformRequest_MetadataUserID(t *testing.T) {
+	transformer := NewTransformer()
+
+	req := &types.CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Metadata: map[string]string{
+			"user_id": "user-42",
+			"ignored": "x",
+		},
+	}
+
+	result := transformer.TransformRequest(req)
+
+	if result.Metadata == nil {
+		t.Fatal("expected Metadata to be set")
+	}
+	if result.Metadata.UserID != "user-42" {
+		t.Errorf("expected user_id 'user-42', got %q", result.Metadata.UserID)
+	}
+}
+
+func TestTransformRequest_MetadataWithoutUserID(t *testing.T) {
+	transformer := NewTransformer()
+
+	req := &types.CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Metadata: map[string]string{"other": "v"},
+	}
+
+	result := transformer.TransformRequest(req)
+
+	if result.Metadata != nil {
+		t.Errorf("expected Metadata nil when user_id absent, got %+v", result.Metadata)
+	}
+}
+
 func TestTransformResponse(t *testing.T) {
 	transformer := NewTransformer()
 

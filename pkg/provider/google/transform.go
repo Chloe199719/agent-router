@@ -66,6 +66,21 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *GenerateCo
 	return gReq
 }
 
+// ApplyMetadataAsLabels merges req.Metadata into gReq.Labels.
+// Vertex AI accepts this field on generateContent; the Google Generative Language API
+// (AI Studio / API key) rejects unknown fields, so do not call this for that client.
+func ApplyMetadataAsLabels(gReq *GenerateContentRequest, metadata map[string]string) {
+	if len(metadata) == 0 {
+		return
+	}
+	if gReq.Labels == nil {
+		gReq.Labels = make(map[string]string, len(metadata))
+	}
+	for k, v := range metadata {
+		gReq.Labels[k] = v
+	}
+}
+
 // transformMessages converts unified messages to Google format.
 func (t *Transformer) transformMessages(messages []types.Message) ([]Content, *Content) {
 	var contents []Content
