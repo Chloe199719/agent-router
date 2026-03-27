@@ -267,6 +267,7 @@ type streamReader struct {
 
 	// Accumulated state
 	content    []types.ContentBlock
+	thoughtBuf []types.ContentBlock
 	toolCalls  []types.ToolCall
 	usage      *types.Usage
 	stopReason types.StopReason
@@ -372,7 +373,11 @@ func (s *streamReader) processChunk(chunk *googleProvider.StreamChunk) *types.St
 	// Process parts
 	for _, part := range candidate.Content.Parts {
 		if part.Text != "" {
-			// Accumulate text
+			if part.Thought {
+				s.appendThoughtText(part.Text)
+				return nil
+			}
+			s.thoughtBuf = nil
 			if len(s.content) == 0 || s.content[len(s.content)-1].Type != types.ContentTypeText {
 				s.content = append(s.content, types.ContentBlock{
 					Type: types.ContentTypeText,
@@ -413,12 +418,40 @@ func (s *streamReader) processChunk(chunk *googleProvider.StreamChunk) *types.St
 	return nil
 }
 
+func (s *streamReader) appendThoughtText(text string) {
+	if len(s.thoughtBuf) == 0 || s.thoughtBuf[len(s.thoughtBuf)-1].Type != types.ContentTypeText {
+		s.thoughtBuf = append(s.thoughtBuf, types.ContentBlock{
+			Type: types.ContentTypeText,
+			Text: text,
+		})
+	} else {
+		s.thoughtBuf[len(s.thoughtBuf)-1].Text += text
+	}
+}
+
+func vertexStreamHasTextBlocks(blocks []types.ContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type == types.ContentTypeText {
+			return true
+		}
+	}
+	return false
+}
+
 // buildResponse builds the final response from accumulated state.
 func (s *streamReader) buildResponse() {
+	content := s.content
+	if !vertexStreamHasTextBlocks(content) && len(s.thoughtBuf) > 0 {
+		merged := make([]types.ContentBlock, 0, len(s.thoughtBuf)+len(content))
+		merged = append(merged, s.thoughtBuf...)
+		merged = append(merged, content...)
+		content = merged
+	}
+
 	s.response = &types.CompletionResponse{
 		Provider:   types.ProviderVertex,
 		Model:      s.model,
-		Content:    s.content,
+		Content:    content,
 		StopReason: s.stopReason,
 		ToolCalls:  s.toolCalls,
 		CreatedAt:  time.Now(),

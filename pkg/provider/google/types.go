@@ -19,6 +19,9 @@ type Content struct {
 
 // Part is a content part.
 type Part struct {
+	// Thought is true when this part is model reasoning / thought summary (Gemini thinking).
+	// See https://ai.google.dev/api/caching#Part
+	Thought          bool              `json:"thought,omitempty"`
 	Text             string            `json:"text,omitempty"`
 	InlineData       *InlineData       `json:"inlineData,omitempty"`
 	FileData         *FileData         `json:"fileData,omitempty"`
@@ -52,14 +55,23 @@ type FunctionResponse struct {
 
 // GenerationConfig configures generation parameters.
 type GenerationConfig struct {
-	Temperature      *float64 `json:"temperature,omitempty"`
-	TopP             *float64 `json:"topP,omitempty"`
-	TopK             *int     `json:"topK,omitempty"`
-	MaxOutputTokens  *int     `json:"maxOutputTokens,omitempty"`
-	StopSequences    []string `json:"stopSequences,omitempty"`
-	CandidateCount   *int     `json:"candidateCount,omitempty"`
-	ResponseMimeType string   `json:"responseMimeType,omitempty"`
-	ResponseSchema   *Schema  `json:"responseSchema,omitempty"`
+	Temperature      *float64           `json:"temperature,omitempty"`
+	TopP             *float64           `json:"topP,omitempty"`
+	TopK             *int               `json:"topK,omitempty"`
+	MaxOutputTokens  *int               `json:"maxOutputTokens,omitempty"`
+	StopSequences    []string           `json:"stopSequences,omitempty"`
+	CandidateCount   *int               `json:"candidateCount,omitempty"`
+	ResponseMimeType string             `json:"responseMimeType,omitempty"`
+	ResponseSchema   *Schema            `json:"responseSchema,omitempty"`
+	ThinkingConfig   *ThinkingConfigGen `json:"thinkingConfig,omitempty"`
+}
+
+// ThinkingConfigGen is Gemini generateContent thinkingConfig (REST camelCase).
+// See https://ai.google.dev/gemini-api/docs/thinking
+type ThinkingConfigGen struct {
+	ThinkingLevel   string `json:"thinkingLevel,omitempty"`
+	ThinkingBudget  *int   `json:"thinkingBudget,omitempty"`
+	IncludeThoughts *bool  `json:"includeThoughts,omitempty"`
 }
 
 // Schema is Google's schema format.
@@ -131,9 +143,11 @@ type PromptFeedback struct {
 
 // UsageMetadata contains usage information.
 type UsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount,omitempty"`
+	ToolUsePromptTokenCount int `json:"toolUsePromptTokenCount,omitempty"`
 }
 
 // StreamChunk is a streaming response chunk.

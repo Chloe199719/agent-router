@@ -336,6 +336,42 @@ func TestTransformRequest_MetadataUserID(t *testing.T) {
 	}
 }
 
+func TestTransformRequest_ThinkingEnabled(t *testing.T) {
+	transformer := NewTransformer()
+	budget := 4096
+	req := &types.CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Thinking: &types.ThinkingConfig{Budget: &budget},
+	}
+	result := transformer.TransformRequest(req)
+	if result.Thinking == nil {
+		t.Fatal("expected Thinking to be set")
+	}
+	if result.Thinking.Type != "enabled" {
+		t.Errorf("expected type enabled, got %q", result.Thinking.Type)
+	}
+	if result.Thinking.BudgetTokens == nil || *result.Thinking.BudgetTokens != 4096 {
+		t.Errorf("expected budget_tokens 4096, got %+v", result.Thinking.BudgetTokens)
+	}
+}
+
+func TestTransformRequest_ThinkingAdaptive(t *testing.T) {
+	transformer := NewTransformer()
+	req := &types.CompletionRequest{
+		Model:    "claude-sonnet-4-20250514",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Thinking: &types.ThinkingConfig{Type: "adaptive", Effort: "medium"},
+	}
+	result := transformer.TransformRequest(req)
+	if result.Thinking == nil {
+		t.Fatal("expected Thinking to be set")
+	}
+	if result.Thinking.Type != "adaptive" || result.Thinking.Effort != "medium" {
+		t.Errorf("got %+v", result.Thinking)
+	}
+}
+
 func TestTransformRequest_MetadataWithoutUserID(t *testing.T) {
 	transformer := NewTransformer()
 

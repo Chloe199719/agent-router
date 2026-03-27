@@ -63,7 +63,39 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *GenerateCo
 		gReq.ToolConfig = t.transformToolChoice(req.ToolChoice)
 	}
 
+	if req.Thinking != nil {
+		if tc := thinkingToGemini(req.Thinking); tc != nil {
+			genConfig.ThinkingConfig = tc
+		}
+	}
+
 	return gReq
+}
+
+func thinkingToGemini(c *types.ThinkingConfig) *ThinkingConfigGen {
+	if c == nil {
+		return nil
+	}
+	var tc ThinkingConfigGen
+	if c.Level != "" {
+		tc.ThinkingLevel = c.Level
+	}
+	if c.Budget != nil {
+		b := *c.Budget
+		tc.ThinkingBudget = &b
+	}
+	if tc.ThinkingLevel == "" && tc.ThinkingBudget == nil && c.IncludeThoughts == nil {
+		return nil
+	}
+	// Vertex AI often bills thinking under thoughtsTokenCount and omits text parts unless
+	// includeThoughts is set (see UsageMetadata in GenerateContentResponse).
+	if c.IncludeThoughts != nil {
+		v := *c.IncludeThoughts
+		tc.IncludeThoughts = &v
+	} else {
+		tc.IncludeThoughts = types.Ptr(true)
+	}
+	return &tc
 }
 
 // ApplyMetadataAsLabels merges req.Metadata into gReq.Labels.
@@ -269,7 +301,7 @@ func (t *Transformer) TransformResponse(resp *GenerateContentResponse) *types.Co
 		return nil
 	}
 
-	candidate := resp.Candidates[0]
+	candidate := t.pickResponseCandidate(resp.Candidates)
 	result := &types.CompletionResponse{
 		Provider:   types.ProviderGoogle,
 		Content:    t.transformResponseContent(candidate.Content),
@@ -280,13 +312,25 @@ func (t *Transformer) TransformResponse(resp *GenerateContentResponse) *types.Co
 
 	if resp.UsageMetadata != nil {
 		result.Usage = types.Usage{
-			InputTokens:  resp.UsageMetadata.PromptTokenCount,
-			OutputTokens: resp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:  resp.UsageMetadata.TotalTokenCount,
+			InputTokens:     resp.UsageMetadata.PromptTokenCount,
+			OutputTokens:    resp.UsageMetadata.CandidatesTokenCount,
+			TotalTokens:     resp.UsageMetadata.TotalTokenCount,
+			ReasoningTokens: resp.UsageMetadata.ThoughtsTokenCount,
 		}
 	}
 
 	return result
+}
+
+func (t *Transformer) pickResponseCandidate(candidates []Candidate) *Candidate {
+	for i := range candidates {
+		c := &candidates[i]
+		blocks := t.transformResponseContent(c.Content)
+		if completionHasTextBlocks(blocks) || len(t.extractToolCalls(c.Content)) > 0 {
+			return c
+		}
+	}
+	return &candidates[0]
 }
 
 // transformResponseContent converts Google content to unified format.
@@ -296,13 +340,18 @@ func (t *Transformer) transformResponseContent(content *Content) []types.Content
 	}
 
 	var blocks []types.ContentBlock
+	var thoughtOnly []types.ContentBlock
+	visibleText := false
 
 	for _, part := range content.Parts {
 		if part.Text != "" {
-			blocks = append(blocks, types.ContentBlock{
-				Type: types.ContentTypeText,
-				Text: part.Text,
-			})
+			b := types.ContentBlock{Type: types.ContentTypeText, Text: part.Text}
+			if part.Thought {
+				thoughtOnly = append(thoughtOnly, b)
+			} else {
+				visibleText = true
+				blocks = append(blocks, b)
+			}
 		}
 
 		if part.FunctionCall != nil {
@@ -314,7 +363,26 @@ func (t *Transformer) transformResponseContent(content *Content) []types.Content
 		}
 	}
 
+	// Gemini / Vertex thinking: the final answer may appear only on parts with thought: true.
+	// If we have any non-thought text, use that as the user-visible answer and omit thought summaries from Content.
+	// If there is no non-thought text, fall back to thought parts so Text() is not empty.
+	if !visibleText && len(thoughtOnly) > 0 {
+		out := make([]types.ContentBlock, 0, len(thoughtOnly)+len(blocks))
+		out = append(out, thoughtOnly...)
+		out = append(out, blocks...)
+		return out
+	}
+
 	return blocks
+}
+
+func completionHasTextBlocks(blocks []types.ContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type == types.ContentTypeText {
+			return true
+		}
+	}
+	return false
 }
 
 // extractToolCalls extracts tool calls from Google content.

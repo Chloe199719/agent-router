@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"strings"
 	"time"
 
 	"github.com/Chloe199719/agent-router/pkg/schema"
@@ -61,7 +62,30 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *MessagesRe
 		anthReq.Metadata = &Metadata{UserID: uid}
 	}
 
+	if req.Thinking != nil {
+		if th := thinkingToAnthropic(req.Thinking); th != nil {
+			anthReq.Thinking = th
+		}
+	}
+
 	return anthReq
+}
+
+func thinkingToAnthropic(c *types.ThinkingConfig) *ThinkingRequest {
+	if c == nil {
+		return nil
+	}
+	if strings.EqualFold(c.Type, "adaptive") {
+		if strings.TrimSpace(c.Effort) == "" {
+			return nil
+		}
+		return &ThinkingRequest{Type: "adaptive", Effort: strings.TrimSpace(c.Effort)}
+	}
+	if c.Budget != nil {
+		b := *c.Budget
+		return &ThinkingRequest{Type: "enabled", BudgetTokens: &b}
+	}
+	return nil
 }
 
 // transformMessages converts unified messages to Anthropic format.

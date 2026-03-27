@@ -2,25 +2,26 @@ package openai
 
 // ChatCompletionRequest is the OpenAI chat completion request.
 type ChatCompletionRequest struct {
-	Model             string          `json:"model"`
-	Messages          []ChatMessage   `json:"messages"`
-	MaxTokens         *int            `json:"max_completion_tokens,omitempty"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	TopP              *float64        `json:"top_p,omitempty"`
-	N                 *int            `json:"n,omitempty"`
-	Stream            bool            `json:"stream,omitempty"`
-	StreamOptions     *StreamOptions  `json:"stream_options,omitempty"`
-	Stop              []string        `json:"stop,omitempty"`
-	PresencePenalty   *float64        `json:"presence_penalty,omitempty"`
-	FrequencyPenalty  *float64        `json:"frequency_penalty,omitempty"`
-	LogitBias         map[string]int  `json:"logit_bias,omitempty"`
-	User              string          `json:"user,omitempty"`
-	ResponseFormat    *ResponseFormat `json:"response_format,omitempty"`
-	Tools             []Tool          `json:"tools,omitempty"`
-	ToolChoice        any             `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
-	Seed              *int            `json:"seed,omitempty"`
+	Model             string            `json:"model"`
+	Messages          []ChatMessage     `json:"messages"`
+	MaxTokens         *int              `json:"max_completion_tokens,omitempty"`
+	Temperature       *float64          `json:"temperature,omitempty"`
+	TopP              *float64          `json:"top_p,omitempty"`
+	N                 *int              `json:"n,omitempty"`
+	Stream            bool              `json:"stream,omitempty"`
+	StreamOptions     *StreamOptions    `json:"stream_options,omitempty"`
+	Stop              []string          `json:"stop,omitempty"`
+	PresencePenalty   *float64          `json:"presence_penalty,omitempty"`
+	FrequencyPenalty  *float64          `json:"frequency_penalty,omitempty"`
+	LogitBias         map[string]int    `json:"logit_bias,omitempty"`
+	User              string            `json:"user,omitempty"`
+	ResponseFormat    *ResponseFormat   `json:"response_format,omitempty"`
+	Tools             []Tool            `json:"tools,omitempty"`
+	ToolChoice        any               `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	Seed              *int              `json:"seed,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
+	ReasoningEffort   string            `json:"reasoning_effort,omitempty"`
 }
 
 // StreamOptions configures streaming behavior.

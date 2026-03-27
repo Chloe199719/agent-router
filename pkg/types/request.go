@@ -34,8 +34,34 @@ type CompletionRequest struct {
 	// The Google Generative Language API (AI Studio) does not accept labels; Metadata is ignored there.
 	Metadata map[string]string `json:"metadata,omitempty"`
 
+	// Thinking requests extended reasoning where the provider and model support it.
+	// See ThinkingConfig for which fields apply to each provider; the router validates
+	// model support and required field combinations before calling the provider.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+
 	// Provider-specific options (passed through without modification)
 	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// ThinkingConfig is a unified thinking / reasoning request.
+// Fields are mapped per provider as follows:
+//   - Budget: Anthropic messages API thinking.budget_tokens (type "enabled"); Gemini 2.5+ thinkingBudget.
+//   - Effort: OpenAI chat completions reasoning_effort; Anthropic adaptive thinking effort (type "adaptive").
+//   - Level: Gemini 3 thinkingLevel (e.g. minimal, low, medium, high).
+//   - Type: Anthropic only — "enabled" or "adaptive" (see Anthropic extended thinking docs).
+//   - IncludeThoughts: Gemini thinkingConfig.includeThoughts (thought summaries in the response).
+//     When omitted but budget/level is set, the router defaults this to true so Vertex/Gemini return text parts
+//     (otherwise usage may only report thoughtsTokenCount with empty candidates content).
+//
+// Doc references: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+// https://ai.google.dev/gemini-api/docs/thinking
+// https://platform.openai.com/docs/guides/reasoning
+type ThinkingConfig struct {
+	Budget          *int   `json:"budget,omitempty"`
+	Effort          string `json:"effort,omitempty"`
+	Level           string `json:"level,omitempty"`
+	Type            string `json:"type,omitempty"` // anthropic: "enabled" | "adaptive"
+	IncludeThoughts *bool  `json:"include_thoughts,omitempty"`
 }
 
 // ResponseFormat configures structured output.

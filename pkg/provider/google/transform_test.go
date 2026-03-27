@@ -455,6 +455,49 @@ func TestTransformRequest_JSONSchemaResponseFormat(t *testing.T) {
 	}
 }
 
+func TestTransformRequest_ThinkingDefaultsIncludeThoughts(t *testing.T) {
+	transformer := NewTransformer()
+	req := &types.CompletionRequest{
+		Model:    "gemini-2.5-flash",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Thinking: &types.ThinkingConfig{Level: "low"},
+	}
+	result := transformer.TransformRequest(req)
+	tc := result.GenerationConfig.ThinkingConfig
+	if tc == nil || tc.IncludeThoughts == nil || !*tc.IncludeThoughts {
+		t.Fatalf("expected includeThoughts true by default when thinking is set, got %+v", tc)
+	}
+}
+
+func TestTransformRequest_ThinkingConfig(t *testing.T) {
+	transformer := NewTransformer()
+	budget := 2048
+	inc := true
+	req := &types.CompletionRequest{
+		Model:    "gemini-2.5-flash",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Thinking: &types.ThinkingConfig{
+			Budget:          &budget,
+			Level:           "low",
+			IncludeThoughts: &inc,
+		},
+	}
+	result := transformer.TransformRequest(req)
+	tc := result.GenerationConfig.ThinkingConfig
+	if tc == nil {
+		t.Fatal("expected ThinkingConfig")
+	}
+	if tc.ThinkingLevel != "low" {
+		t.Errorf("thinkingLevel: got %q", tc.ThinkingLevel)
+	}
+	if tc.ThinkingBudget == nil || *tc.ThinkingBudget != 2048 {
+		t.Errorf("thinkingBudget: got %+v", tc.ThinkingBudget)
+	}
+	if tc.IncludeThoughts == nil || !*tc.IncludeThoughts {
+		t.Errorf("includeThoughts: got %+v", tc.IncludeThoughts)
+	}
+}
+
 func TestApplyMetadataAsLabels(t *testing.T) {
 	transformer := NewTransformer()
 
@@ -482,6 +525,49 @@ func TestApplyMetadataAsLabels(t *testing.T) {
 	}
 	if gReq.Labels["trace"] != "abc-123" {
 		t.Errorf("expected label trace=abc-123, got %q", gReq.Labels["trace"])
+	}
+}
+
+func TestTransformResponse_ThoughtPartFallback(t *testing.T) {
+	transformer := NewTransformer()
+	resp := &GenerateContentResponse{
+		Candidates: []Candidate{
+			{
+				Content: &Content{
+					Role: "model",
+					Parts: []Part{
+						{Thought: true, Text: "ok"},
+					},
+				},
+				FinishReason: "STOP",
+			},
+		},
+	}
+	result := transformer.TransformResponse(resp)
+	if result.Text() != "ok" {
+		t.Errorf("expected thought-only text as fallback, got %q", result.Text())
+	}
+}
+
+func TestTransformResponse_PrefersNonThoughtText(t *testing.T) {
+	transformer := NewTransformer()
+	resp := &GenerateContentResponse{
+		Candidates: []Candidate{
+			{
+				Content: &Content{
+					Role: "model",
+					Parts: []Part{
+						{Thought: true, Text: "thinking"},
+						{Thought: false, Text: "answer"},
+					},
+				},
+				FinishReason: "STOP",
+			},
+		},
+	}
+	result := transformer.TransformResponse(resp)
+	if result.Text() != "answer" {
+		t.Errorf("expected visible answer only, got %q", result.Text())
 	}
 }
 

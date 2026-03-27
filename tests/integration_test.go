@@ -7,6 +7,7 @@
 //   - OPENAI_API_KEY
 //   - ANTHROPIC_API_KEY
 //   - GOOGLE_API_KEY (optional)
+//   - OPENAI_THINKING_MODEL — model for reasoning/thinking tests (default: gpt-5-mini)
 //   - VERTEX_BATCH_WAIT_RESULTS=1 — run slow Vertex batch GetResults / RequestLabels checks (optional)
 //
 //go:build integration
@@ -16,6 +17,7 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -25,6 +27,7 @@ import (
 
 	router "github.com/Chloe199719/agent-router"
 	"github.com/Chloe199719/agent-router/pkg/batch"
+	routererrors "github.com/Chloe199719/agent-router/pkg/errors"
 	"github.com/Chloe199719/agent-router/pkg/provider"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
@@ -44,6 +47,9 @@ const (
 
 	// Short timeout for tests
 	testTimeout = 60 * time.Second
+
+	// Default OpenAI model for reasoning_effort / thinking tests (override with OPENAI_THINKING_MODEL).
+	openAIThinkingModelDefault = "gpt-5-mini"
 )
 
 // getRouter creates a router with available providers
@@ -97,6 +103,14 @@ func hasProvider(r *router.Router, p types.Provider) bool {
 		}
 	}
 	return false
+}
+
+// thinkingIntegrationModel returns envKey if set, otherwise defaultModel.
+func thinkingIntegrationModel(envKey, defaultModel string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return v
+	}
+	return defaultModel
 }
 
 // ============================================================================
@@ -878,6 +892,159 @@ func TestOpenAI_StopSequences(t *testing.T) {
 
 	t.Logf("Response (should stop at 3): %s", text)
 	t.Logf("Stop reason: %s", resp.StopReason)
+}
+
+// ============================================================================
+// Thinking mode (extended reasoning)
+// ============================================================================
+
+func TestOpenAI_ThinkingReasoningEffort(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderOpenAI) {
+		t.Skip("OpenAI not configured")
+	}
+
+	model := thinkingIntegrationModel("OPENAI_THINKING_MODEL", openAIThinkingModelDefault)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderOpenAI,
+		Model:     model,
+		MaxTokens: types.Ptr(80),
+		Thinking:  &types.ThinkingConfig{Effort: "low"},
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Reply with exactly: ok"),
+		},
+	})
+	if err != nil {
+		var re *routererrors.RouterError
+		if errors.As(err, &re) && re.Code == routererrors.ErrCodeModelNotFound {
+			t.Skipf("Thinking model not available: %v", err)
+		}
+		t.Fatalf("Completion failed: %v", err)
+	}
+	if text := strings.TrimSpace(strings.ToLower(resp.Text())); text == "" {
+		t.Error("empty response text")
+	} else {
+		t.Logf("Response: %s", resp.Text())
+	}
+	t.Logf("Usage: %+v", resp.Usage)
+}
+
+func TestAnthropic_ThinkingEnabled(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderAnthropic) {
+		t.Skip("Anthropic not configured")
+	}
+
+	budget := 2048
+	maxTok := 8192
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderAnthropic,
+		Model:     anthropicModel,
+		MaxTokens: &maxTok,
+		Thinking:  &types.ThinkingConfig{Budget: &budget},
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Reply with exactly: ok"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Completion failed: %v", err)
+	}
+	if resp.Text() == "" {
+		t.Error("empty response text")
+	}
+	t.Logf("Response: %s", resp.Text())
+	t.Logf("Usage: %+v", resp.Usage)
+}
+
+func TestGoogle_ThinkingLevel(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderGoogle) {
+		t.Skip("Google not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderGoogle,
+		Model:     googleModel,
+		MaxTokens: types.Ptr(80),
+		Thinking:  &types.ThinkingConfig{Level: "low"},
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Reply with exactly: ok"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Completion failed: %v", err)
+	}
+	if resp.Text() == "" {
+		t.Error("empty response text")
+	}
+	t.Logf("Response: %s", resp.Text())
+	t.Logf("Usage: %+v", resp.Usage)
+}
+
+func TestVertex_ThinkingLevel(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderVertex) {
+		t.Skip("Vertex AI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	resp, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderVertex,
+		Model:     vertexModel,
+		MaxTokens: types.Ptr(80),
+		Thinking:  &types.ThinkingConfig{Level: "low"},
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Reply with exactly: ok"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Completion failed: %v", err)
+	}
+	if resp.Text() == "" {
+		t.Error("empty response text")
+	}
+	t.Logf("Response: %s", resp.Text())
+	t.Logf("Usage: %+v", resp.Usage)
+}
+
+// TestThinking_RouterRejectsUnsupportedModel ensures validation runs before the provider call.
+func TestThinking_RouterRejectsUnsupportedModel(t *testing.T) {
+	r := getRouter(t)
+	if !hasProvider(r, types.ProviderOpenAI) {
+		t.Skip("OpenAI not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	_, err := r.Complete(ctx, &types.CompletionRequest{
+		Provider:  types.ProviderOpenAI,
+		Model:     openAIModel, // gpt-4o-mini — not a reasoning model for our heuristics
+		MaxTokens: types.Ptr(50),
+		Thinking:  &types.ThinkingConfig{Effort: "low"},
+		Messages: []types.Message{
+			types.NewTextMessage(types.RoleUser, "Hi"),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for thinking on non-reasoning model")
+	}
+	var re *routererrors.RouterError
+	if !errors.As(err, &re) || re.Code != routererrors.ErrCodeInvalidRequest {
+		t.Fatalf("expected invalid_request, got: %v", err)
+	}
+	t.Logf("Got expected error: %v", err)
 }
 
 // ============================================================================

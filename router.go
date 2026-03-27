@@ -34,6 +34,7 @@ import (
 	"github.com/Chloe199719/agent-router/pkg/provider/google"
 	"github.com/Chloe199719/agent-router/pkg/provider/openai"
 	"github.com/Chloe199719/agent-router/pkg/provider/vertex"
+	"github.com/Chloe199719/agent-router/pkg/thinking"
 	"github.com/Chloe199719/agent-router/pkg/types"
 )
 
@@ -266,6 +267,10 @@ func (r *Router) checkFeatureSupport(p provider.Provider, req *types.CompletionR
 				break
 			}
 		}
+	}
+
+	if err := thinking.ValidateThinking(p.Name(), req.Model, req.Thinking, req.MaxTokens); err != nil {
+		return err
 	}
 
 	return nil

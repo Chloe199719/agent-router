@@ -2,19 +2,28 @@ package anthropic
 
 // MessagesRequest is the Anthropic messages API request.
 type MessagesRequest struct {
-	Model         string        `json:"model"`
-	Messages      []Message     `json:"messages"`
-	MaxTokens     int           `json:"max_tokens"`
-	System        any           `json:"system,omitempty"` // string or []SystemBlock
-	Temperature   *float64      `json:"temperature,omitempty"`
-	TopP          *float64      `json:"top_p,omitempty"`
-	TopK          *int          `json:"top_k,omitempty"`
-	StopSequences []string      `json:"stop_sequences,omitempty"`
-	Stream        bool          `json:"stream,omitempty"`
-	Tools         []Tool        `json:"tools,omitempty"`
-	ToolChoice    *ToolChoice   `json:"tool_choice,omitempty"`
-	Metadata      *Metadata     `json:"metadata,omitempty"`
-	OutputConfig  *OutputConfig `json:"output_config,omitempty"`
+	Model         string           `json:"model"`
+	Messages      []Message        `json:"messages"`
+	MaxTokens     int              `json:"max_tokens"`
+	System        any              `json:"system,omitempty"` // string or []SystemBlock
+	Temperature   *float64         `json:"temperature,omitempty"`
+	TopP          *float64         `json:"top_p,omitempty"`
+	TopK          *int             `json:"top_k,omitempty"`
+	StopSequences []string         `json:"stop_sequences,omitempty"`
+	Stream        bool             `json:"stream,omitempty"`
+	Tools         []Tool           `json:"tools,omitempty"`
+	ToolChoice    *ToolChoice      `json:"tool_choice,omitempty"`
+	Metadata      *Metadata        `json:"metadata,omitempty"`
+	OutputConfig  *OutputConfig    `json:"output_config,omitempty"`
+	Thinking      *ThinkingRequest `json:"thinking,omitempty"`
+}
+
+// ThinkingRequest is Anthropic Messages API extended / adaptive thinking.
+// See https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
+type ThinkingRequest struct {
+	Type         string `json:"type"` // "enabled" | "adaptive"
+	BudgetTokens *int   `json:"budget_tokens,omitempty"`
+	Effort       string `json:"effort,omitempty"`
 }
 
 // Message is an Anthropic message.

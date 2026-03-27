@@ -58,6 +58,10 @@ func (t *Transformer) TransformRequest(req *types.CompletionRequest) *ChatComple
 		}
 	}
 
+	if req.Thinking != nil && req.Thinking.Effort != "" {
+		oaiReq.ReasoningEffort = req.Thinking.Effort
+	}
+
 	return oaiReq
 }
 

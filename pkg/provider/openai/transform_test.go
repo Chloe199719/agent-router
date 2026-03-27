@@ -355,6 +355,19 @@ func TestTransformRequest_ToolChoiceSpecific(t *testing.T) {
 	}
 }
 
+func TestTransformRequest_ReasoningEffort(t *testing.T) {
+	transformer := NewTransformer()
+	req := &types.CompletionRequest{
+		Model:    "gpt-5",
+		Messages: []types.Message{types.NewTextMessage(types.RoleUser, "Hi")},
+		Thinking: &types.ThinkingConfig{Effort: "high"},
+	}
+	result := transformer.TransformRequest(req)
+	if result.ReasoningEffort != "high" {
+		t.Errorf("expected reasoning_effort high, got %q", result.ReasoningEffort)
+	}
+}
+
 func TestTransformRequest_Metadata(t *testing.T) {
 	transformer := NewTransformer()
 
